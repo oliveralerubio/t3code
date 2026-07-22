@@ -3,8 +3,35 @@ import { safeErrorLogAttributes } from "@t3tools/client-runtime/errors";
 import * as Schema from "effect/Schema";
 import { useCallback, useEffect, useSyncExternalStore } from "react";
 
-const ThemePreference = Schema.Literals(["light", "dark", "system"]);
+const CUSTOM_DARK_THEME_OPTIONS = [
+  { value: "catppuccin-mocha", label: "Catppuccin Mocha" },
+  { value: "dracula", label: "Dracula" },
+  { value: "one-dark-pro", label: "One Dark Pro" },
+  { value: "tokyo-night", label: "Tokyo Night" },
+  { value: "gruvbox-dark", label: "Gruvbox Dark" },
+  { value: "nord", label: "Nord" },
+  { value: "github-dark", label: "GitHub Dark" },
+  { value: "material-theme-palenight", label: "Material Palenight" },
+  { value: "rose-pine", label: "Rosé Pine" },
+  { value: "kanagawa-dragon", label: "Kanagawa Dragon" },
+  { value: "everforest-dark", label: "Everforest Dark" },
+  { value: "monokai", label: "Monokai" },
+  { value: "vitesse-dark", label: "Vitesse Dark" },
+  { value: "solarized-dark", label: "Solarized Dark" },
+  { value: "synthwave-84", label: "SynthWave '84" },
+] as const;
+
+export const THEME_OPTIONS = [
+  { value: "system", label: "System" },
+  { value: "light", label: "Light" },
+  { value: "dark", label: "Dark" },
+  ...CUSTOM_DARK_THEME_OPTIONS,
+] as const;
+
+const ThemePreference = Schema.Literals(THEME_OPTIONS.map((option) => option.value));
 type Theme = typeof ThemePreference.Type;
+type DesktopTheme = "light" | "dark" | "system";
+const isThemePreferenceSchema = Schema.is(ThemePreference);
 type ThemeSnapshot = {
   theme: Theme;
   systemDark: boolean;
@@ -37,6 +64,10 @@ export class ThemeStorageError extends Schema.TaggedErrorClass<ThemeStorageError
 
 export const isThemeStorageError = Schema.is(ThemeStorageError);
 
+export function isThemePreference(value: unknown): value is Theme {
+  return typeof value === "string" && isThemePreferenceSchema(value);
+}
+
 export class DesktopThemeSyncError extends Schema.TaggedErrorClass<DesktopThemeSyncError>()(
   "DesktopThemeSyncError",
   {
@@ -53,7 +84,7 @@ export const isDesktopThemeSyncError = Schema.is(DesktopThemeSyncError);
 
 let listeners: Array<() => void> = [];
 let lastSnapshot: ThemeSnapshot | null = null;
-let lastDesktopTheme: Theme | null = null;
+let lastDesktopTheme: DesktopTheme | null = null;
 let lastAppliedTheme: ThemeSnapshot | null = null;
 let themeStorageReadFailure: ThemeStorageError | null = null;
 
@@ -81,7 +112,7 @@ export function readThemePreference(): Theme {
       cause,
     });
   }
-  if (raw === "light" || raw === "dark" || raw === "system") return raw;
+  if (raw !== null && isThemePreference(raw)) return raw;
   return DEFAULT_THEME_SNAPSHOT.theme;
 }
 
@@ -184,8 +215,12 @@ function applyTheme(theme: Theme, suppressTransitions = false) {
   if (suppressTransitions) {
     document.documentElement.classList.add("no-transitions");
   }
-  const isDark = theme === "dark" || (theme === "system" && systemDark);
+  const isCustomDarkTheme = theme !== "light" && theme !== "dark" && theme !== "system";
+  const isDark = isCustomDarkTheme || theme === "dark" || (theme === "system" && systemDark);
   document.documentElement.classList.toggle("dark", isDark);
+  if (document.documentElement.dataset) {
+    document.documentElement.dataset.t3Theme = isCustomDarkTheme ? theme : "";
+  }
   lastAppliedTheme = { theme, systemDark };
   syncBrowserChromeTheme();
   syncDesktopTheme(theme);
@@ -201,7 +236,7 @@ function applyTheme(theme: Theme, suppressTransitions = false) {
 
 export async function syncDesktopThemePreference(
   bridge: DesktopThemeBridge,
-  theme: Theme,
+  theme: DesktopTheme,
 ): Promise<void> {
   try {
     await bridge.setTheme(theme);
@@ -217,8 +252,12 @@ export function syncDesktopTheme(theme: Theme) {
     return;
   }
 
-  lastDesktopTheme = theme;
-  void syncDesktopThemePreference(bridge, theme).catch((cause: unknown) => {
+  const desktopTheme: DesktopTheme =
+    theme === "system" || theme === "light" || theme === "dark" ? theme : "dark";
+  if (lastDesktopTheme === desktopTheme) return;
+
+  lastDesktopTheme = desktopTheme;
+  void syncDesktopThemePreference(bridge, desktopTheme).catch((cause: unknown) => {
     const error = isDesktopThemeSyncError(cause)
       ? cause
       : new DesktopThemeSyncError({ theme, cause });
@@ -226,7 +265,7 @@ export function syncDesktopTheme(theme: Theme) {
       theme: error.theme,
       ...safeErrorLogAttributes(error),
     });
-    if (lastDesktopTheme === theme) {
+    if (lastDesktopTheme === desktopTheme) {
       lastDesktopTheme = null;
     }
   });
@@ -288,7 +327,13 @@ export function useTheme() {
   const theme = snapshot.theme;
 
   const resolvedTheme: "light" | "dark" =
-    theme === "system" ? (snapshot.systemDark ? "dark" : "light") : theme;
+    theme === "system"
+      ? snapshot.systemDark
+        ? "dark"
+        : "light"
+      : theme === "light"
+        ? "light"
+        : "dark";
 
   const setTheme = useCallback((next: Theme) => {
     if (typeof window === "undefined") return;
