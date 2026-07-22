@@ -27,6 +27,16 @@ afterEach(() => {
 });
 
 describe("theme failure handling", () => {
+  it("preserves a custom dark theme stored by an earlier Claudex build", async () => {
+    const storage = createStorage();
+    storage.setItem("t3code:theme", "catppuccin-mocha");
+    vi.stubGlobal("window", { localStorage: storage });
+
+    const { readThemePreference } = await import("./useTheme");
+
+    expect(readThemePreference()).toBe("catppuccin-mocha");
+  });
+
   it("preserves exact storage causes and operation context", async () => {
     const readCause = new Error("storage read blocked");
     const writeCause = new Error("storage quota exceeded");
