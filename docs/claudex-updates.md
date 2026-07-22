@@ -2,10 +2,10 @@
 
 This fork keeps two intentional branch roles:
 
-- `main` is a clean mirror of `pingdotgg/t3code:main`.
-- `claudex-custom` is the release branch. It contains the Claudex UI themes and any future source-level customizations.
+- `upstream-main` is a clean mirror of `pingdotgg/t3code:main`.
+- `main` is the release branch. It contains the Claudex UI themes and any future source-level customizations.
 
-The scheduled **Sync upstream** workflow fast-forwards `main` every Monday and opens a pull request from `main` to `claudex-custom`. It never overwrites the custom branch. Review, resolve any conflict, run the relevant checks, and merge the pull request before producing a Claudex build.
+The scheduled **Sync upstream** workflow fast-forwards `upstream-main` every Monday and opens a pull request from `upstream-main` to `main`. It never overwrites the custom branch. Review, resolve any conflict, run the relevant checks, and merge the pull request before producing a Claudex build.
 
 ## Models and local state
 
@@ -15,7 +15,7 @@ Before switching the desktop launcher to a build from this fork, make a private 
 
 ## Releasing a Claudex build
 
-Build from a reviewed commit on `claudex-custom` using the existing Linux artifact command:
+Build from a reviewed commit on `main` using the existing Linux artifact command:
 
 ```bash
 vp run dist:desktop:linux

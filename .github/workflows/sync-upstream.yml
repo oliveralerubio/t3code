@@ -16,7 +16,7 @@ jobs:
       - name: Checkout fork mirror branch
         uses: actions/checkout@v6
         with:
-          ref: main
+          ref: upstream-main
           fetch-depth: 0
 
       - name: Fast-forward the upstream mirror
@@ -24,17 +24,17 @@ jobs:
           git remote add upstream https://github.com/pingdotgg/t3code.git
           git fetch upstream main
           git merge --ff-only upstream/main
-          git push origin HEAD:main
+          git push origin HEAD:upstream-main
 
       - name: Open an update pull request for Claudex
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh pr list --base claudex-custom --head main --state open --json number --jq 'length > 0' | grep -qx true; then
+          if gh pr list --base main --head upstream-main --state open --json number --jq 'length > 0' | grep -qx true; then
             exit 0
           fi
           gh pr create \
-            --base claudex-custom \
-            --head main \
+            --base main \
+            --head upstream-main \
             --title "chore: sync upstream T3 Code" \
             --body "Automated upstream update. Merge after resolving and validating any conflicts against the Claudex customizations."
