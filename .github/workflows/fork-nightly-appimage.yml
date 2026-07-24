@@ -110,7 +110,7 @@ jobs:
           set -euo pipefail
           mkdir -p release-publish
           shopt -s nullglob
-          assets=(release/*.AppImage release/*.blockmap release/*.yml)
+          assets=(release/*.AppImage release/*.yml)
           if ((${#assets[@]} == 0)); then
             echo "The desktop build did not produce release assets." >&2
             exit 1
@@ -128,11 +128,6 @@ jobs:
             echo "Expected the nightly updater manifest at $manifest." >&2
             exit 1
           fi
-          if [[ ! -f "release-publish/${appimage}.blockmap" ]]; then
-            echo "Expected blockmap release-publish/${appimage}.blockmap is missing." >&2
-            exit 1
-          fi
-
           node --input-type=module - "$manifest" "release-publish/$appimage" "$EXPECTED_VERSION" <<'NODE'
           import { createHash } from "node:crypto";
           import { readFileSync } from "node:fs";
@@ -218,5 +213,4 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             release-publish/*.AppImage
-            release-publish/*.blockmap
             release-publish/*.yml
