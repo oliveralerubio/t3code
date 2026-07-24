@@ -1,0 +1,214 @@
+name: Fork Nightly AppImage
+
+on:
+  workflow_dispatch:
+
+# This workflow deliberately publishes only the Linux desktop prerelease for
+# this fork. It does not require the upstream release app, npm, relay, Vercel,
+# Discord, signing, or any repository secret beyond the workflow GITHUB_TOKEN.
+concurrency:
+  group: fork-nightly-appimage-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and validate Linux x64 nightly
+    if: github.repository == 'oliveralerubio/t3code' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.release_meta.outputs.version }}
+      tag: ${{ steps.release_meta.outputs.tag }}
+      name: ${{ steps.release_meta.outputs.name }}
+    env:
+      # The desktop packager writes these coordinates into electron-updater
+      # metadata. They are validated from the finished AppImage below.
+      T3CODE_DESKTOP_UPDATE_REPOSITORY: ${{ github.repository }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: true
+
+      - name: Ensure Electron runtime is installed
+        run: vp run --filter @t3tools/desktop ensure:electron
+
+      - id: release_meta
+        name: Resolve nightly version and unique release tag
+        shell: bash
+        env:
+          NIGHTLY_SHA: ${{ github.sha }}
+          NIGHTLY_RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          nightly_date="$(date -u +%Y%m%d)"
+          metadata_file="$RUNNER_TEMP/nightly-release-metadata"
+          GITHUB_OUTPUT="$metadata_file" node scripts/resolve-nightly-release.ts \
+            --date "$nightly_date" \
+            --run-number "$NIGHTLY_RUN_NUMBER" \
+            --sha "$NIGHTLY_SHA" \
+            --github-output
+
+          grep -Ev '^(tag|name)=' "$metadata_file" >> "$GITHUB_OUTPUT"
+          # Electron-updater derives prerelease channels from a semver Git tag,
+          # so the release tag must remain the canonical v<version> form.
+          version="$(sed -n 's/^version=//p' "$metadata_file")"
+          short_sha="$(sed -n 's/^short_sha=//p' "$metadata_file")"
+          echo "tag=v${version}" >> "$GITHUB_OUTPUT"
+          echo "name=T3 Code Fork Nightly ${version} (${short_sha})" >> "$GITHUB_OUTPUT"
+
+      - name: Align package versions to nightly version
+        run: node scripts/update-release-package-versions.ts "${{ steps.release_meta.outputs.version }}"
+
+      - name: Install ImageMagick
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y imagemagick
+          if command -v magick >/dev/null 2>&1; then
+            magick -version
+          else
+            convert -version
+          fi
+
+      - name: Build Linux x64 AppImage and updater metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          vp run dist:desktop:artifact \
+            --platform linux \
+            --target AppImage \
+            --arch x64 \
+            --build-version "${{ steps.release_meta.outputs.version }}" \
+            --verbose
+
+      - name: Collect and validate release assets
+        shell: bash
+        env:
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+          EXPECTED_VERSION: ${{ steps.release_meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-publish
+          shopt -s nullglob
+          assets=(release/*.AppImage release/*.blockmap release/*.yml)
+          if ((${#assets[@]} == 0)); then
+            echo "The desktop build did not produce release assets." >&2
+            exit 1
+          fi
+          cp "${assets[@]}" release-publish/
+
+          mapfile -t appimages < <(find release-publish -maxdepth 1 -type f -name '*.AppImage' -printf '%f\n' | sort)
+          if ((${#appimages[@]} != 1)); then
+            echo "Expected exactly one AppImage, found ${#appimages[@]}." >&2
+            exit 1
+          fi
+          appimage="${appimages[0]}"
+          manifest="release-publish/nightly-linux.yml"
+          if [[ ! -f "$manifest" ]]; then
+            echo "Expected the nightly updater manifest at $manifest." >&2
+            exit 1
+          fi
+          if [[ ! -f "release-publish/${appimage}.blockmap" ]]; then
+            echo "Expected blockmap release-publish/${appimage}.blockmap is missing." >&2
+            exit 1
+          fi
+
+          node --input-type=module - "$manifest" "release-publish/$appimage" "$EXPECTED_VERSION" <<'NODE'
+          import { createHash } from "node:crypto";
+          import { readFileSync } from "node:fs";
+          import { basename } from "node:path";
+
+          const [manifestPath, appImagePath, expectedVersion] = process.argv.slice(2);
+          const manifest = readFileSync(manifestPath, "utf8");
+          const scalar = (key) => {
+            const match = manifest.match(new RegExp(`^${key}:\\s*(.+?)\\s*$`, "m"));
+            return match?.[1]?.replace(/^['"]|['"]$/g, "");
+          };
+          const fail = (message) => {
+            console.error(`Invalid nightly updater manifest: ${message}`);
+            process.exit(1);
+          };
+
+          if (scalar("version") !== expectedVersion) fail("version does not match the release version");
+          const appImageName = basename(appImagePath);
+          if (scalar("path") !== appImageName) fail("path does not name the AppImage asset");
+          const urls = [...manifest.matchAll(/^\s*-\s+url:\s*(.+?)\s*$/gm)].map((match) =>
+            match[1].replace(/^['"]|['"]$/g, ""),
+          );
+          if (urls.length !== 1 || urls[0] !== appImageName) {
+            fail("files must reference exactly the published AppImage asset");
+          }
+          const expectedSha512 = scalar("sha512");
+          const actualSha512 = createHash("sha512").update(readFileSync(appImagePath)).digest("base64");
+          if (expectedSha512 !== actualSha512) fail("sha512 does not match the AppImage asset");
+          NODE
+
+          extraction_dir="$(mktemp -d)"
+          trap 'rm -rf "$extraction_dir"' EXIT
+          (
+            cd "$extraction_dir"
+            "${GITHUB_WORKSPACE}/release-publish/${appimage}" --appimage-extract >/dev/null
+          )
+          app_update="$(find "$extraction_dir/squashfs-root" -type f -path '*/resources/app-update.yml' -print -quit)"
+          if [[ -z "$app_update" ]]; then
+            echo "The AppImage does not contain electron-updater configuration." >&2
+            exit 1
+          fi
+          expected_owner="${EXPECTED_REPOSITORY%%/*}"
+          expected_repo="${EXPECTED_REPOSITORY#*/}"
+          grep -Fx 'provider: github' "$app_update"
+          grep -Fx "owner: ${expected_owner}" "$app_update"
+          grep -Fx "repo: ${expected_repo}" "$app_update"
+          grep -Fx 'releaseType: prerelease' "$app_update"
+          grep -Fx 'channel: nightly' "$app_update"
+
+      - name: Upload validated release assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: fork-nightly-appimage
+          path: release-publish/*
+          if-no-files-found: error
+
+  release:
+    name: Publish Linux x64 nightly
+    needs: build
+    if: ${{ needs.build.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download validated release assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: fork-nightly-appimage
+          path: release-publish
+
+      - name: Publish fork nightly prerelease
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          tag_name: ${{ needs.build.outputs.tag }}
+          name: ${{ needs.build.outputs.name }}
+          target_commitish: ${{ github.sha }}
+          prerelease: true
+          make_latest: false
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            release-publish/*.AppImage
+            release-publish/*.blockmap
+            release-publish/*.yml
