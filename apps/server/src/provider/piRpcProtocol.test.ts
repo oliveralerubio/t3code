@@ -111,7 +111,22 @@ describe("Pi RPC protocol", () => {
         reasoning: true,
         thinkingLevelMap: { low: "low", medium: null, high: "high" },
       }),
-    ).toEqual(["low", "high"]);
+    ).toEqual(["off", "minimal", "low", "high", "xhigh", "max"]);
+    expect(
+      piThinkingLevelsFromModel({
+        reasoning: true,
+        thinkingLevelMap: { xhigh: "xhigh", minimal: null, max: "max" },
+      }),
+    ).toEqual(["off", "low", "medium", "high", "xhigh", "max"]);
+    expect(piThinkingLevelsFromModel({ reasoning: true })).toEqual([
+      "off",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+    ]);
     expect(piThinkingLevelsFromModel({ reasoning: false })).toEqual(["off"]);
   });
 
