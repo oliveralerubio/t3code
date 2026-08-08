@@ -27,6 +27,7 @@ import {
   OCEAN_THEME,
   updateCustomTheme,
   CUSTOM_THEMES_STORAGE_KEY,
+  CLAUDEX_THEMES,
   createManagedThemeColors,
   createVividThemeColors,
   getDefaultThemeColors,
@@ -353,6 +354,17 @@ describe("theme files", () => {
           contrastRatio(colors!.messageActionForeground, colors!.messageAction),
         ).toBeGreaterThanOrEqual(theme === T3_CHAT_THEME ? 3 : 4.5);
       }
+    }
+  });
+
+  it("keeps the 15 Claudex themes registered after the theme-library migration", () => {
+    expect(CLAUDEX_THEMES).toHaveLength(15);
+    for (const theme of CLAUDEX_THEMES) {
+      expect(getThemeDefinition(theme.id)).toBe(theme);
+      expect(getThemeModes(theme)).toEqual(["dark"]);
+      expect(theme.colors.canvas).toMatch(/^#[0-9a-f]{6}$/i);
+      expect(theme.colors.accent).toMatch(/^#[0-9a-f]{6}$/i);
+      expect(isKnownThemePreference(theme.id)).toBe(true);
     }
   });
 

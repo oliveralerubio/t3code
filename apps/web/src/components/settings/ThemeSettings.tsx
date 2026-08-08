@@ -17,6 +17,7 @@ import {
   type ThemeDefinition,
   type ThemeHalves,
   T3_CHAT_THEME,
+  CLAUDEX_THEMES,
   EMBER_THEME,
   GROVE_THEME,
   IRIS_THEME,
@@ -52,6 +53,7 @@ const MAINTAINER_THEMES: ReadonlyArray<ThemeDefinition> = [
   OCEAN_THEME,
   EMBER_THEME,
   IRIS_THEME,
+  ...CLAUDEX_THEMES,
 ];
 
 function downloadThemeFile(filename: string, contents: string): void {
@@ -495,7 +497,11 @@ export function ThemeLibrary({
                   initialAppearance,
                 })
               }
-              onUse={() => persistTheme(maintainerTheme.id)}
+              onUse={() => {
+                const modes = getThemeModes(maintainerTheme);
+                if (modes.length === 1) assignHalf(modes[0]!, maintainerTheme.id);
+                else persistTheme(maintainerTheme.id);
+              }}
               onUseMode={handlePairPick(maintainerTheme.id)}
               theme={card}
             />
