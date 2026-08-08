@@ -50,5 +50,9 @@ describe("Pi RPC protocol", () => {
         },
       })[0]?.type,
     ).toBe("item.completed");
+    expect(mapPiRpcEvent({ threadId, turnId, event: { type: "agent_end" } })).toEqual([]);
+    expect(mapPiRpcEvent({ threadId, turnId, event: { type: "agent_settled" } })[0]?.type).toBe(
+      "turn.completed",
+    );
   });
 });

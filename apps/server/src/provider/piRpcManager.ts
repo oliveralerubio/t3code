@@ -132,6 +132,7 @@ export class PiRpcManager {
       else pending.reject(commandError(pending.command, parsed));
       return;
     }
+    const eventTurnId = session.turnId;
     if (parsed.type === "turn_start") session.status = "running";
     if (parsed.type === "agent_settled") {
       session.status = "ready";
@@ -140,7 +141,7 @@ export class PiRpcManager {
     this.emit({
       kind: "rpc-event",
       threadId: session.threadId,
-      ...(session.turnId ? { turnId: session.turnId } : {}),
+      ...(eventTurnId ? { turnId: eventTurnId } : {}),
       ...(session.model ? { model: session.model } : {}),
       payload: parsed,
     });

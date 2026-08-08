@@ -177,7 +177,7 @@ export function mapPiRpcEvent(input: {
       } as unknown as ProviderRuntimeEvent,
     ];
   }
-  if (type === "agent_settled" || type === "agent_end") {
+  if (type === "agent_settled") {
     return [
       {
         type: "turn.completed",
