@@ -681,6 +681,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const nonPersistedComposerImageIds = composerDraft.nonPersistedImageIds;
 
   const setComposerDraftPrompt = useComposerDraftStore((store) => store.setPrompt);
+  const setComposerDraftRuntimeMode = useComposerDraftStore((store) => store.setRuntimeMode);
   const addComposerDraftImage = useComposerDraftStore((store) => store.addImage);
   const addComposerDraftImages = useComposerDraftStore((store) => store.addImages);
   const removeComposerDraftImage = useComposerDraftStore((store) => store.removeImage);
@@ -891,6 +892,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     [selectedInstanceId, selectedModel, selectedModelOptionsForDispatch],
   );
   const selectedModelForPicker = selectedModel;
+  const effectiveRuntimeMode: RuntimeMode = selectedProvider === "pi" ? "full-access" : runtimeMode;
+  useEffect(() => {
+    if (selectedProvider === "pi" && composerDraft.runtimeMode !== "full-access") {
+      setComposerDraftRuntimeMode(composerDraftTarget, "full-access");
+    }
+  }, [
+    composerDraft.runtimeMode,
+    composerDraftTarget,
+    selectedProvider,
+    setComposerDraftRuntimeMode,
+  ]);
   // Instance-keyed option list so the picker can show each configured
   // instance (built-in + custom) as a first-class sidebar entry. The
   // options are server-reported models plus that exact instance's
@@ -3149,11 +3161,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 {isComposerFooterCompact ? (
                   <CompactComposerControlsMenu
                     interactionMode={interactionMode}
-                    runtimeMode={runtimeMode}
+                    runtimeMode={effectiveRuntimeMode}
                     showInteractionModeToggle={composerProviderControls.showInteractionModeToggle}
                     traitsMenuContent={providerTraitsMenuContent}
                     onToggleInteractionMode={toggleInteractionMode}
-                    onRuntimeModeChange={handleRuntimeModeChange}
+                    onRuntimeModeChange={
+                      selectedProvider === "pi" ? () => undefined : handleRuntimeModeChange
+                    }
                   />
                 ) : (
                   <>
@@ -3166,9 +3180,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     <ComposerFooterModeControls
                       showInteractionModeToggle={composerProviderControls.showInteractionModeToggle}
                       interactionMode={interactionMode}
-                      runtimeMode={runtimeMode}
+                      runtimeMode={effectiveRuntimeMode}
                       onToggleInteractionMode={toggleInteractionMode}
-                      onRuntimeModeChange={handleRuntimeModeChange}
+                      onRuntimeModeChange={
+                        selectedProvider === "pi" ? () => undefined : handleRuntimeModeChange
+                      }
                     />
                   </>
                 )}
