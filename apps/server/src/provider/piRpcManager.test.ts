@@ -13,7 +13,7 @@ describe("PiRpcManager lifecycle", () => {
   });
 
   it("publishes Pi thinking levels and does not invent a model when discovery is empty", () => {
-    const descriptor = piModelCapabilities().optionDescriptors.find(
+    const descriptor = (piModelCapabilities().optionDescriptors ?? []).find(
       (candidate) => candidate.id === "thinkingLevel",
     );
 
