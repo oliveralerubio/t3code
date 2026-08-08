@@ -5,6 +5,7 @@ import {
   parsePiModel,
   parsePiRpcLine,
   parsePiThinkingLevel,
+  piThinkingLevelsFromModel,
 } from "./piRpcProtocol.ts";
 
 describe("Pi RPC protocol", () => {
@@ -67,6 +68,40 @@ describe("Pi RPC protocol", () => {
       },
     })[0];
     expect(first?.itemId).not.toBe(second?.itemId);
+  });
+
+  it("separates text-tool-text assistant segments without message ids", () => {
+    const threadId = ThreadId.make("pi-thread");
+    const turnId = TurnId.make("pi-turn");
+    const first = mapPiRpcEvent({
+      threadId,
+      turnId,
+      event: {
+        type: "message_update",
+        piAssistantSequence: 1,
+        assistantMessageEvent: { type: "text_delta", delta: "one" },
+      },
+    })[0];
+    const second = mapPiRpcEvent({
+      threadId,
+      turnId,
+      event: {
+        type: "message_update",
+        piAssistantSequence: 2,
+        assistantMessageEvent: { type: "text_delta", delta: "two" },
+      },
+    })[0];
+    expect(first?.itemId).not.toBe(second?.itemId);
+  });
+
+  it("derives Pi thinking levels from model metadata", () => {
+    expect(
+      piThinkingLevelsFromModel({
+        reasoning: true,
+        thinkingLevelMap: { low: "low", medium: null, high: "high" },
+      }),
+    ).toEqual(["low", "high"]);
+    expect(piThinkingLevelsFromModel({ reasoning: false })).toEqual(["off"]);
   });
 
   it("suppresses empty assistant completions and maps tool stages", () => {

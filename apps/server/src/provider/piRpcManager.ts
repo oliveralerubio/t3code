@@ -18,6 +18,7 @@ import {
   parsePiModel,
   parsePiRpcLine,
   parsePiThinkingLevel,
+  piThinkingLevelsFromModel,
   type PiRpcRecord,
 } from "./piRpcProtocol.ts";
 
@@ -47,7 +48,6 @@ export function piModelCapabilities(
 
 export function mapPiAvailableModels(
   models: ReadonlyArray<unknown>,
-  thinkingLevels: ReadonlyArray<PiThinkingLevel> = [],
 ): ReadonlyArray<ServerProviderModel> {
   const seen = new Set<string>();
   return models.flatMap((model) => {
@@ -60,7 +60,7 @@ export function mapPiAvailableModels(
         slug,
         name: stringValue(record.name) ?? slug,
         isCustom: false,
-        capabilities: piModelCapabilities(thinkingLevels),
+        capabilities: piModelCapabilities(piThinkingLevelsFromModel(record)),
       },
     ];
   });
@@ -121,11 +121,13 @@ interface SessionState {
   sessionFile: string | undefined;
   sessionId: string | undefined;
   turnId: TurnId | undefined;
+  promptPending: boolean;
   status: ProviderSession["status"];
   stopping: boolean;
   stdoutBuffer: string;
   stderrBuffer: string;
   assistantMessageSequence: number;
+  activeAssistantSequence: number | undefined;
   assistantStopReason: string | undefined;
   assistantErrorMessage: string | undefined;
   terminalTurnId: TurnId | undefined;
@@ -148,6 +150,19 @@ export function deletePiSessionIfCurrent(
   if (sessions.get(threadId) !== session) return false;
   sessions.delete(threadId);
   return true;
+}
+
+export function buildPiPromptCommand(input: {
+  readonly message: string;
+  readonly steering: boolean;
+  readonly images?: ReadonlyArray<unknown>;
+}): PiRpcRecord {
+  return {
+    type: "prompt",
+    message: input.message,
+    ...(input.steering ? { streamingBehavior: "steer" } : {}),
+    ...(input.images?.length ? { images: input.images } : {}),
+  };
 }
 
 function modelFromState(value: unknown): string | undefined {
@@ -220,11 +235,23 @@ export class PiRpcManager {
       return;
     }
     const eventTurnId = session.turnId;
+    const eventMessage = parsed.message as PiRpcRecord | undefined;
+    const isAssistantMessage = eventMessage?.role === "assistant";
+    if (parsed.type === "message_start" && isAssistantMessage)
+      session.activeAssistantSequence = session.assistantMessageSequence++;
+    const assistantSequence = isAssistantMessage
+      ? (session.activeAssistantSequence ??= session.assistantMessageSequence++)
+      : undefined;
     const event =
-      parsed.type === "message_end" &&
-      (parsed.message as PiRpcRecord | undefined)?.role === "assistant"
-        ? { ...parsed, piAssistantSequence: session.assistantMessageSequence++ }
-        : parsed;
+      assistantSequence === undefined
+        ? parsed
+        : {
+            ...parsed,
+            piAssistantSequence: assistantSequence,
+            ...(eventMessage
+              ? { message: { ...eventMessage, piAssistantSequence: assistantSequence } }
+              : {}),
+          };
     if (event.type === "turn_start") {
       session.status = "running";
       session.terminalTurnId = undefined;
@@ -247,6 +274,7 @@ export class PiRpcManager {
         session.assistantErrorMessage =
           stringValue(message.errorMessage) ?? session.assistantErrorMessage;
       }
+      if (message?.role === "assistant") session.activeAssistantSequence = undefined;
     }
     if (event.type === "agent_settled") {
       if (session.terminalTurnId === eventTurnId) return;
@@ -321,11 +349,13 @@ export class PiRpcManager {
       sessionFile: undefined,
       sessionId: undefined,
       turnId: undefined,
+      promptPending: false,
       status: "connecting",
       stopping: false,
       stdoutBuffer: "",
       stderrBuffer: "",
       assistantMessageSequence: 0,
+      activeAssistantSequence: undefined,
       assistantStopReason: undefined,
       assistantErrorMessage: undefined,
       terminalTurnId: undefined,
@@ -449,14 +479,7 @@ export class PiRpcManager {
         await this.request(session, { type: "switch_session", sessionPath: resume!.sessionFile });
       if (input.model) await this.setModelState(session, input.model);
       if (input.thinkingLevel) await this.setThinkingState(session, input.thinkingLevel);
-      const state = (await this.request(session, { type: "get_state" })).data;
-      const stateRecord = state && typeof state === "object" ? (state as PiRpcRecord) : {};
-      session.model = modelFromState(stateRecord.model) ?? session.model;
-      session.thinkingLevel =
-        parsePiThinkingLevel(stateRecord.thinkingLevel) ?? session.thinkingLevel;
-      await this.refreshThinkingLevels(session);
-      session.sessionFile = stringValue(stateRecord.sessionFile);
-      session.sessionId = stringValue(stateRecord.sessionId);
+      const stateRecord = await this.readState(session);
       session.status = stateRecord.isStreaming === true ? "running" : "ready";
       return {
         provider: ProviderDriverKind.make("pi"),
@@ -485,41 +508,32 @@ export class PiRpcManager {
     const separator = model.indexOf("/");
     if (separator <= 0 || separator === model.length - 1)
       throw new Error(`Invalid Pi model '${model}'.`);
-    await this.request(session, {
+    const response = await this.request(session, {
       type: "set_model",
       provider: model.slice(0, separator),
       modelId: model.slice(separator + 1),
     });
     session.model = model;
-    await this.refreshThinkingLevels(session);
+    session.thinkingLevels = piThinkingLevelsFromModel(response.data);
   }
 
-  private async refreshThinkingLevels(session: SessionState): Promise<void> {
-    try {
-      const response = await this.request(
-        session,
-        { type: "get_available_thinking_levels" },
-        1_000,
-      );
-      const data = response.data && typeof response.data === "object" ? response.data : {};
-      const levels = (data as PiRpcRecord).levels;
-      session.thinkingLevels = Array.isArray(levels)
-        ? levels.flatMap((level: unknown) => {
-            const parsed = parsePiThinkingLevel(level);
-            return parsed ? [parsed] : [];
-          })
-        : [];
-    } catch {
-      session.thinkingLevels = [];
-    }
+  private async readState(session: SessionState): Promise<PiRpcRecord> {
+    const state = (await this.request(session, { type: "get_state" })).data;
+    const stateRecord = state && typeof state === "object" ? (state as PiRpcRecord) : {};
+    session.model = modelFromState(stateRecord.model) ?? session.model;
+    session.thinkingLevels = piThinkingLevelsFromModel(stateRecord.model);
+    session.thinkingLevel =
+      parsePiThinkingLevel(stateRecord.thinkingLevel) ?? session.thinkingLevel;
+    session.sessionFile = stringValue(stateRecord.sessionFile);
+    session.sessionId = stringValue(stateRecord.sessionId);
+    return stateRecord;
   }
 
   private async setThinkingState(session: SessionState, level: PiThinkingLevel): Promise<void> {
-    await this.request(session, { type: "set_thinking_level", level });
-    await this.refreshThinkingLevels(session);
     if (session.thinkingLevels.length && !session.thinkingLevels.includes(level))
       throw new Error(`Pi model does not support thinking level '${level}'.`);
-    session.thinkingLevel = level;
+    await this.request(session, { type: "set_thinking_level", level });
+    await this.readState(session);
   }
 
   async sendTurn(input: {
@@ -537,18 +551,31 @@ export class PiRpcManager {
     if (!session) throw new Error(`Unknown Pi RPC thread '${input.threadId}'.`);
     if (session.status === "error" || session.stopping)
       throw new Error("Pi session is not accepting turns after a failed request.");
-    if (input.model && input.model !== session.model)
+    if (session.promptPending) throw new Error("Pi prompt acceptance is still pending.");
+    if (session.turnId && input.model && input.model !== session.model)
+      throw new Error("Pi cannot change models while a turn is running.");
+    if (session.turnId && input.thinkingLevel && input.thinkingLevel !== session.thinkingLevel)
+      throw new Error("Pi cannot change thinking levels while a turn is running.");
+    if (!session.turnId && input.model && input.model !== session.model)
       await this.setModelState(session, input.model);
-    if (input.thinkingLevel && input.thinkingLevel !== session.thinkingLevel)
+    if (!session.turnId && input.thinkingLevel && input.thinkingLevel !== session.thinkingLevel)
       await this.setThinkingState(session, input.thinkingLevel);
-    const turnId = TurnId.make(NodeCrypto.randomUUID());
+    const turnId = session.turnId ?? TurnId.make(NodeCrypto.randomUUID());
+    session.promptPending = true;
+    try {
+      await this.request(
+        session,
+        buildPiPromptCommand({
+          message: input.input ?? "",
+          steering: session.turnId !== undefined,
+          ...(input.images?.length ? { images: input.images } : {}),
+        }),
+      );
+    } finally {
+      session.promptPending = false;
+    }
     session.turnId = turnId;
     session.status = "running";
-    await this.request(session, {
-      type: "prompt",
-      message: input.input ?? "",
-      ...(input.images?.length ? { images: input.images } : {}),
-    });
     return {
       threadId: input.threadId,
       turnId,
@@ -603,18 +630,8 @@ export class PiRpcManager {
       const data =
         response.data && typeof response.data === "object" ? (response.data as PiRpcRecord) : {};
       const models = Array.isArray(data.models) ? data.models : [];
-      const discovered: Array<ServerProviderModel> = [];
-      for (const model of models) {
-        const slug = parsePiModel(model);
-        if (!slug) continue;
-        try {
-          await this.setModelState(session, slug);
-        } catch {
-          session.thinkingLevels = [];
-        }
-        discovered.push(...mapPiAvailableModels([model], session.thinkingLevels));
-      }
-      return discovered;
+      await this.readState(session);
+      return mapPiAvailableModels(models);
     } finally {
       await this.stopSessionState(session);
     }

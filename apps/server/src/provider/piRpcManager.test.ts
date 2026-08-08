@@ -2,6 +2,7 @@ import { describe, expect, it } from "@effect/vitest";
 import { ThreadId } from "@t3tools/contracts";
 import {
   decodePiUtf8Chunks,
+  buildPiPromptCommand,
   deletePiSessionIfCurrent,
   mapPiAvailableModels,
   PiRpcManager,
@@ -31,6 +32,18 @@ describe("PiRpcManager lifecycle", () => {
   it("does not advertise thinking levels until Pi reports actual support", () => {
     expect(piModelCapabilities().optionDescriptors).toEqual([]);
     expect(mapPiAvailableModels([])).toEqual([]);
+  });
+
+  it("uses steering only for an already accepted running turn", () => {
+    expect(buildPiPromptCommand({ message: "first", steering: false })).toEqual({
+      type: "prompt",
+      message: "first",
+    });
+    expect(buildPiPromptCommand({ message: "follow-up", steering: true })).toEqual({
+      type: "prompt",
+      message: "follow-up",
+      streamingBehavior: "steer",
+    });
   });
 
   it("only advertises the levels returned by Pi", () => {
