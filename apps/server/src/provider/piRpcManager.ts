@@ -294,7 +294,9 @@ export class PiRpcManager {
     cwd: string | undefined,
     runtimeMode: RuntimeMode,
   ): SessionState {
-    const args = ["--mode", "rpc"];
+    // T3 Code has no Pi extension-UI bridge. Disable extension discovery so
+    // installed extensions cannot block an otherwise healthy RPC session.
+    const args = ["--mode", "rpc", "--no-extensions"];
     if (this.options.agentDir) args.push("--session-dir", this.options.agentDir);
     const child = NodeChildProcess.spawn(this.options.binaryPath, args, {
       cwd,
