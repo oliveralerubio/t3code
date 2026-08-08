@@ -696,3 +696,5 @@ export const PiAgentIcon: Icon = ({ className, ...props }) => (
     <path fill="#fff" d="M517.36 400H634.72V634.72H517.36Z" />
   </svg>
 );
+
+export const PrimeAgentIcon: Icon = PiAgentIcon;

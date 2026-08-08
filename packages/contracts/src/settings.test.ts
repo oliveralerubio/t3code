@@ -184,6 +184,25 @@ describe("Pi provider settings", () => {
   });
 });
 
+describe("Prime Agent provider settings", () => {
+  it("defaults to the documented binary and keeps custom models hidden", () => {
+    const settings = decodeServerSettings({
+      providers: { primeAgent: { customModels: ["openai/gpt-5"] } },
+    });
+    expect(settings.providers.primeAgent.binaryPath).toBe("prime-agent");
+    expect(settings.providers.primeAgent.agentDir).toBe("");
+    expect(settings.providers.primeAgent.customModels).toEqual(["openai/gpt-5"]);
+  });
+
+  it("accepts partial updates through the provider-specific patch shape", () => {
+    expect(
+      decodeServerSettingsPatch({
+        providers: { primeAgent: { binaryPath: "~/bin/prime-agent", agentDir: "~/.prime" } },
+      }).providers?.primeAgent,
+    ).toEqual({ binaryPath: "~/bin/prime-agent", agentDir: "~/.prime" });
+  });
+});
+
 describe("ServerSettings worktree defaults", () => {
   it("defaults start-from-origin on for legacy configs", () => {
     expect(decodeServerSettings({}).newWorktreesStartFromOrigin).toBe(true);

@@ -10,18 +10,23 @@ import {
 } from "@t3tools/contracts";
 
 export type PiRpcRecord = Readonly<Record<string, unknown>>;
+export type AgentRpcRecord = PiRpcRecord;
 
-export function parsePiRpcLine(line: string): PiRpcRecord | null {
+export function parseAgentRpcLine(line: string): AgentRpcRecord | null {
   const normalized = line.endsWith("\r") ? line.slice(0, -1) : line;
   if (normalized.length === 0) return null;
   try {
     const value: unknown = JSON.parse(normalized);
     return value !== null && typeof value === "object" && !Array.isArray(value)
-      ? (value as PiRpcRecord)
+      ? (value as AgentRpcRecord)
       : null;
   } catch {
     return null;
   }
+}
+
+export function parsePiRpcLine(line: string): PiRpcRecord | null {
+  return parseAgentRpcLine(line);
 }
 
 export function parsePiModel(value: unknown): string | undefined {
@@ -36,6 +41,7 @@ export function parsePiModel(value: unknown): string | undefined {
         : "";
   return provider && modelId ? `${provider}/${modelId}` : undefined;
 }
+export const parseAgentModel = parsePiModel;
 
 export function parsePiThinkingLevel(value: unknown): PiThinkingLevel | undefined {
   switch (value) {
@@ -51,6 +57,7 @@ export function parsePiThinkingLevel(value: unknown): PiThinkingLevel | undefine
       return undefined;
   }
 }
+export const parseAgentThinkingLevel = parsePiThinkingLevel;
 
 function asRecord(value: unknown): PiRpcRecord | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -79,12 +86,17 @@ function textFromMessage(value: unknown): string | undefined {
   return direct || undefined;
 }
 
-function assistantItemId(threadId: ThreadId, turnId: TurnId | undefined, message: PiRpcRecord) {
+function assistantItemId(
+  provider: ProviderDriverKind,
+  threadId: ThreadId,
+  turnId: TurnId | undefined,
+  message: PiRpcRecord,
+) {
   const identity =
     asString(message.id) ??
     asString(message.messageId) ??
     String(message.piAssistantSequence ?? "unknown");
-  return `pi-assistant:${threadId}:${turnId ?? "session"}:${identity}`;
+  return `${provider}-assistant:${threadId}:${turnId ?? "session"}:${identity}`;
 }
 
 export function piThinkingLevelsFromModel(value: unknown): ReadonlyArray<PiThinkingLevel> {
@@ -98,11 +110,12 @@ export function piThinkingLevelsFromModel(value: unknown): ReadonlyArray<PiThink
   }
   return model?.reasoning === false ? ["off"] : [];
 }
+export const agentThinkingLevelsFromModel = piThinkingLevelsFromModel;
 
-function base(threadId: ThreadId, turnId?: TurnId, itemId?: string) {
+function base(provider: ProviderDriverKind, threadId: ThreadId, turnId?: TurnId, itemId?: string) {
   return {
     eventId: EventId.make(globalThis.crypto.randomUUID()),
-    provider: ProviderDriverKind.make("pi"),
+    provider,
     threadId,
     createdAt: new Date().toISOString(),
     ...(turnId ? { turnId } : {}),
@@ -114,6 +127,15 @@ export function mapPiRpcEvent(input: {
   readonly threadId: ThreadId;
   readonly turnId?: TurnId;
   readonly event: PiRpcRecord;
+}): ReadonlyArray<ProviderRuntimeEvent> {
+  return mapAgentRpcEvent({ ...input, provider: ProviderDriverKind.make("pi") });
+}
+
+export function mapAgentRpcEvent(input: {
+  readonly provider: ProviderDriverKind;
+  readonly threadId: ThreadId;
+  readonly turnId?: TurnId;
+  readonly event: AgentRpcRecord;
 }): ReadonlyArray<ProviderRuntimeEvent> {
   const type = asString(input.event.type);
   if (!type) return [];
@@ -128,9 +150,10 @@ export function mapPiRpcEvent(input: {
       {
         type: "content.delta",
         ...base(
+          input.provider,
           input.threadId,
           input.turnId,
-          assistantItemId(input.threadId, input.turnId, payload),
+          assistantItemId(input.provider, input.threadId, input.turnId, payload),
         ),
         payload: { streamKind, delta },
       } as unknown as ProviderRuntimeEvent,
@@ -144,9 +167,10 @@ export function mapPiRpcEvent(input: {
           {
             type: "item.completed",
             ...base(
+              input.provider,
               input.threadId,
               input.turnId,
-              assistantItemId(input.threadId, input.turnId, message),
+              assistantItemId(input.provider, input.threadId, input.turnId, message),
             ),
             payload: {
               itemType: "assistant_message",
@@ -179,7 +203,7 @@ export function mapPiRpcEvent(input: {
             : type === "tool_execution_end"
               ? "item.completed"
               : "item.updated",
-        ...base(input.threadId, input.turnId, `pi-tool:${toolId}`),
+        ...base(input.provider, input.threadId, input.turnId, `${input.provider}-tool:${toolId}`),
         payload: {
           itemType: "dynamic_tool_call",
           status,
@@ -193,7 +217,7 @@ export function mapPiRpcEvent(input: {
     return [
       {
         type: "turn.started",
-        ...base(input.threadId, input.turnId),
+        ...base(input.provider, input.threadId, input.turnId),
         payload: {},
       } as unknown as ProviderRuntimeEvent,
     ];
@@ -202,11 +226,11 @@ export function mapPiRpcEvent(input: {
     return [
       {
         type: "runtime.error",
-        ...base(input.threadId, input.turnId),
+        ...base(input.provider, input.threadId, input.turnId),
         payload: {
           message:
             asString(payload.errorMessage) ??
-            "Pi requested extension UI input, which T3 Code cannot answer.",
+            `${input.provider} requested extension UI input, which T3 Code cannot answer.`,
           class: "provider_error",
           detail: payload,
         },
@@ -227,7 +251,7 @@ export function mapPiRpcEvent(input: {
     return [
       {
         type: "turn.completed",
-        ...base(input.threadId, input.turnId),
+        ...base(input.provider, input.threadId, input.turnId),
         payload: {
           state,
           stopReason,
