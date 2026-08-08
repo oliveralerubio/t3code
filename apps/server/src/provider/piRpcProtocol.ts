@@ -79,6 +79,14 @@ function textFromMessage(value: unknown): string | undefined {
   return direct || undefined;
 }
 
+function assistantItemId(threadId: ThreadId, turnId: TurnId | undefined, message: PiRpcRecord) {
+  const identity =
+    asString(message.id) ??
+    asString(message.messageId) ??
+    String(message.piAssistantSequence ?? "unknown");
+  return `pi-assistant:${threadId}:${turnId ?? "session"}:${identity}`;
+}
+
 function base(threadId: ThreadId, turnId?: TurnId, itemId?: string) {
   return {
     eventId: EventId.make(globalThis.crypto.randomUUID()),
@@ -117,6 +125,7 @@ export function mapPiRpcEvent(input: {
     ];
   }
   if (type === "message_end" && asString(asRecord(payload.message)?.role) === "assistant") {
+    const message = asRecord(payload.message) ?? {};
     const text = textFromMessage(payload.message);
     return text
       ? [
@@ -125,7 +134,7 @@ export function mapPiRpcEvent(input: {
             ...base(
               input.threadId,
               input.turnId,
-              `pi-assistant:${input.threadId}:${input.turnId ?? "session"}`,
+              assistantItemId(input.threadId, input.turnId, message),
             ),
             payload: {
               itemType: "assistant_message",
@@ -177,12 +186,41 @@ export function mapPiRpcEvent(input: {
       } as unknown as ProviderRuntimeEvent,
     ];
   }
+  if (type === "extension_ui_request") {
+    return [
+      {
+        type: "runtime.error",
+        ...base(input.threadId, input.turnId),
+        payload: {
+          message:
+            asString(payload.errorMessage) ??
+            "Pi requested extension UI input, which T3 Code cannot answer.",
+          class: "provider_error",
+          detail: payload,
+        },
+      } as unknown as ProviderRuntimeEvent,
+    ];
+  }
   if (type === "agent_settled") {
+    const stopReason = asString(payload.stopReason) ?? "stop";
+    const errorMessage = asString(payload.errorMessage);
+    const state =
+      stopReason === "error"
+        ? "failed"
+        : stopReason === "aborted"
+          ? "interrupted"
+          : stopReason === "cancelled"
+            ? "cancelled"
+            : "completed";
     return [
       {
         type: "turn.completed",
         ...base(input.threadId, input.turnId),
-        payload: { state: "completed", stopReason: null },
+        payload: {
+          state,
+          stopReason,
+          ...(errorMessage ? { errorMessage } : {}),
+        },
       } as unknown as ProviderRuntimeEvent,
     ];
   }

@@ -21,6 +21,54 @@ describe("Pi RPC protocol", () => {
     expect(parsePiThinkingLevel("ultrathink")).toBeUndefined();
   });
 
+  it("maps Pi terminal stop reasons without duplicating successful completion", () => {
+    const threadId = ThreadId.make("pi-thread");
+    const turnId = TurnId.make("pi-turn");
+
+    expect(
+      mapPiRpcEvent({
+        threadId,
+        turnId,
+        event: { type: "agent_settled", stopReason: "error", errorMessage: "quota exceeded" },
+      })[0],
+    ).toMatchObject({
+      type: "turn.completed",
+      payload: { state: "failed", stopReason: "error", errorMessage: "quota exceeded" },
+    });
+    expect(
+      mapPiRpcEvent({
+        threadId,
+        turnId,
+        event: { type: "agent_settled", stopReason: "aborted", errorMessage: "user stopped" },
+      })[0],
+    ).toMatchObject({
+      type: "turn.completed",
+      payload: { state: "interrupted", stopReason: "aborted", errorMessage: "user stopped" },
+    });
+  });
+
+  it("uses Pi message identity to separate assistant segments", () => {
+    const threadId = ThreadId.make("pi-thread");
+    const turnId = TurnId.make("pi-turn");
+    const first = mapPiRpcEvent({
+      threadId,
+      turnId,
+      event: {
+        type: "message_end",
+        message: { id: "assistant-1", role: "assistant", content: [{ type: "text", text: "one" }] },
+      },
+    })[0];
+    const second = mapPiRpcEvent({
+      threadId,
+      turnId,
+      event: {
+        type: "message_end",
+        message: { id: "assistant-2", role: "assistant", content: [{ type: "text", text: "two" }] },
+      },
+    })[0];
+    expect(first?.itemId).not.toBe(second?.itemId);
+  });
+
   it("suppresses empty assistant completions and maps tool stages", () => {
     const threadId = ThreadId.make("pi-thread");
     const turnId = TurnId.make("pi-turn");
