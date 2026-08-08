@@ -87,6 +87,18 @@ function assistantItemId(threadId: ThreadId, turnId: TurnId | undefined, message
   return `pi-assistant:${threadId}:${turnId ?? "session"}:${identity}`;
 }
 
+export function piThinkingLevelsFromModel(value: unknown): ReadonlyArray<PiThinkingLevel> {
+  const model = asRecord(value);
+  const map = asRecord(model?.thinkingLevelMap);
+  if (map) {
+    return Object.keys(map).flatMap((level) => {
+      const parsed = parsePiThinkingLevel(level);
+      return parsed && map[level] !== null ? [parsed] : [];
+    });
+  }
+  return model?.reasoning === false ? ["off"] : [];
+}
+
 function base(threadId: ThreadId, turnId?: TurnId, itemId?: string) {
   return {
     eventId: EventId.make(globalThis.crypto.randomUUID()),
@@ -118,7 +130,7 @@ export function mapPiRpcEvent(input: {
         ...base(
           input.threadId,
           input.turnId,
-          `pi-assistant:${input.threadId}:${input.turnId ?? "session"}`,
+          assistantItemId(input.threadId, input.turnId, payload),
         ),
         payload: { streamKind, delta },
       } as unknown as ProviderRuntimeEvent,
