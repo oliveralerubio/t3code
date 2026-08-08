@@ -68,7 +68,11 @@ function pending(settings: PiSettings): Effect.Effect<ServerProviderDraft> {
   );
 }
 
-function check(settings: PiSettings, cwd: string): Effect.Effect<ServerProviderDraft> {
+function check(
+  settings: PiSettings,
+  cwd: string,
+  environment: NodeJS.ProcessEnv,
+): Effect.Effect<ServerProviderDraft> {
   return Effect.gen(function* () {
     const checkedAt = DateTime.formatIso(yield* DateTime.now);
     if (!settings.enabled)
@@ -89,6 +93,7 @@ function check(settings: PiSettings, cwd: string): Effect.Effect<ServerProviderD
       new PiRpcManager({
         binaryPath: settings.binaryPath,
         ...(settings.agentDir ? { agentDir: settings.agentDir } : {}),
+        environment,
       }).discoverModels(cwd),
     ).pipe(Effect.orElseSucceed(() => []));
     return buildServerProvider({
@@ -168,7 +173,11 @@ export const PiDriver: ProviderDriver<PiSettings, PiDriverEnv> = {
               }),
             ),
           ),
-        checkProvider: check(effective, serverConfig.cwd).pipe(
+        checkProvider: check(
+          effective,
+          serverConfig.cwd,
+          Object.fromEntries(environment.map(({ name, value }) => [name, value])),
+        ).pipe(
           Effect.map(
             stamp({
               instanceId,
