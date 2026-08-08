@@ -1,4 +1,13 @@
-import type { PiThinkingLevel, ProviderRuntimeEvent, ThreadId, TurnId } from "@t3tools/contracts";
+// @effect-diagnostics globalDate:off cryptoRandomUUID:off
+import {
+  EventId,
+  ProviderDriverKind,
+  RuntimeItemId,
+  type PiThinkingLevel,
+  type ProviderRuntimeEvent,
+  type ThreadId,
+  type TurnId,
+} from "@t3tools/contracts";
 
 export type PiRpcRecord = Readonly<Record<string, unknown>>;
 
@@ -72,12 +81,12 @@ function textFromMessage(value: unknown): string | undefined {
 
 function base(threadId: ThreadId, turnId?: TurnId, itemId?: string) {
   return {
-    eventId: crypto.randomUUID() as never,
-    provider: "pi" as const,
+    eventId: EventId.make(globalThis.crypto.randomUUID()),
+    provider: ProviderDriverKind.make("pi"),
     threadId,
     createdAt: new Date().toISOString(),
     ...(turnId ? { turnId } : {}),
-    ...(itemId ? { itemId: itemId as never } : {}),
+    ...(itemId ? { itemId: RuntimeItemId.make(itemId) } : {}),
   };
 }
 
@@ -104,7 +113,7 @@ export function mapPiRpcEvent(input: {
           `pi-assistant:${input.threadId}:${input.turnId ?? "session"}`,
         ),
         payload: { streamKind, delta },
-      } as ProviderRuntimeEvent,
+      } as unknown as ProviderRuntimeEvent,
     ];
   }
   if (type === "message_end" && asString(asRecord(payload.message)?.role) === "assistant") {
@@ -125,7 +134,7 @@ export function mapPiRpcEvent(input: {
               detail: text,
               data: payload.message,
             },
-          } as ProviderRuntimeEvent,
+          } as unknown as ProviderRuntimeEvent,
         ]
       : [];
   }
@@ -156,7 +165,7 @@ export function mapPiRpcEvent(input: {
           title: asString(payload.toolName) ?? "Tool call",
           data: payload,
         },
-      } as ProviderRuntimeEvent,
+      } as unknown as ProviderRuntimeEvent,
     ];
   }
   if (type === "turn_start") {
@@ -165,7 +174,7 @@ export function mapPiRpcEvent(input: {
         type: "turn.started",
         ...base(input.threadId, input.turnId),
         payload: {},
-      } as ProviderRuntimeEvent,
+      } as unknown as ProviderRuntimeEvent,
     ];
   }
   if (type === "agent_settled" || type === "agent_end") {
@@ -174,7 +183,7 @@ export function mapPiRpcEvent(input: {
         type: "turn.completed",
         ...base(input.threadId, input.turnId),
         payload: { state: "completed", stopReason: null },
-      } as ProviderRuntimeEvent,
+      } as unknown as ProviderRuntimeEvent,
     ];
   }
   return [];

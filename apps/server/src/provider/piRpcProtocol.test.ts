@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { ProviderInstanceId, ThreadId, TurnId } from "@t3tools/contracts";
+import { describe, expect, it } from "@effect/vitest";
+import { ThreadId, TurnId } from "@t3tools/contracts";
 import {
   mapPiRpcEvent,
   parsePiModel,
