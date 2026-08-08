@@ -167,6 +167,23 @@ describe("ServerSettings.providerInstances (slice-2 invariant)", () => {
   });
 });
 
+describe("Pi provider settings", () => {
+  it("keeps custom Pi provider/model slugs in the hidden legacy settings shape", () => {
+    const settings = decodeServerSettings({
+      providers: {
+        pi: { customModels: ["openai/gpt-5", "anthropic/claude-sonnet"] },
+      },
+    });
+    expect(settings.providers.pi.customModels).toEqual(["openai/gpt-5", "anthropic/claude-sonnet"]);
+    expect(decodeServerSettings({}).providers.pi.customModels).toEqual([]);
+    expect(
+      decodeServerSettingsPatch({
+        providers: { pi: { customModels: ["google/gemini-2.5-pro"] } },
+      }).providers?.pi?.customModels,
+    ).toEqual(["google/gemini-2.5-pro"]);
+  });
+});
+
 describe("ServerSettings worktree defaults", () => {
   it("defaults start-from-origin on for legacy configs", () => {
     expect(decodeServerSettings({}).newWorktreesStartFromOrigin).toBe(true);

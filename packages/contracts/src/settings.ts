@@ -490,6 +490,10 @@ export const PiSettings = makeProviderSettingsSchema(
         providerSettingsForm: { placeholder: "~/.pi/agent", clearWhenEmpty: "omit" },
       }),
     ),
+    customModels: Schema.Array(Schema.String).pipe(
+      Schema.withDecodingDefault(Effect.succeed([])),
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+    ),
   },
   { order: ["binaryPath", "agentDir"] },
 );
@@ -733,6 +737,7 @@ const PiSettingsPatch = Schema.Struct({
   enabled: Schema.optionalKey(Schema.Boolean),
   binaryPath: Schema.optionalKey(TrimmedString),
   agentDir: Schema.optionalKey(TrimmedString),
+  customModels: Schema.optionalKey(Schema.Array(Schema.String)),
 });
 
 export const ServerSettingsPatch = Schema.Struct({
