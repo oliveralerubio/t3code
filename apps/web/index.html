@@ -120,6 +120,126 @@
               chrome: "#1d1929",
             },
           },
+          "catppuccin-mocha": {
+            dark: {
+              background: "#1e1e2e",
+              foreground: "#cdd6f4",
+              accent: "#cba6f7",
+              chrome: "#1e1e2e",
+            },
+          },
+          dracula: {
+            dark: {
+              background: "#282a36",
+              foreground: "#f8f8f2",
+              accent: "#bd93f9",
+              chrome: "#282a36",
+            },
+          },
+          "one-dark-pro": {
+            dark: {
+              background: "#282c34",
+              foreground: "#abb2bf",
+              accent: "#61afef",
+              chrome: "#282c34",
+            },
+          },
+          "tokyo-night": {
+            dark: {
+              background: "#1a1b26",
+              foreground: "#c0caf5",
+              accent: "#7aa2f7",
+              chrome: "#1a1b26",
+            },
+          },
+          "gruvbox-dark": {
+            dark: {
+              background: "#282828",
+              foreground: "#ebdbb2",
+              accent: "#d79921",
+              chrome: "#282828",
+            },
+          },
+          nord: {
+            dark: {
+              background: "#2e3440",
+              foreground: "#d8dee9",
+              accent: "#88c0d0",
+              chrome: "#2e3440",
+            },
+          },
+          "github-dark": {
+            dark: {
+              background: "#0d1117",
+              foreground: "#c9d1d9",
+              accent: "#58a6ff",
+              chrome: "#0d1117",
+            },
+          },
+          "material-theme-palenight": {
+            dark: {
+              background: "#292d3e",
+              foreground: "#a6accd",
+              accent: "#c792ea",
+              chrome: "#292d3e",
+            },
+          },
+          "rose-pine": {
+            dark: {
+              background: "#191724",
+              foreground: "#e0def4",
+              accent: "#c4a7e7",
+              chrome: "#191724",
+            },
+          },
+          "kanagawa-dragon": {
+            dark: {
+              background: "#181616",
+              foreground: "#c5c9c5",
+              accent: "#c4b28a",
+              chrome: "#181616",
+            },
+          },
+          "everforest-dark": {
+            dark: {
+              background: "#2d353b",
+              foreground: "#d3c6aa",
+              accent: "#a7c080",
+              chrome: "#2d353b",
+            },
+          },
+          monokai: {
+            dark: {
+              background: "#272822",
+              foreground: "#f8f8f2",
+              accent: "#a6e22e",
+              chrome: "#272822",
+            },
+          },
+          "vitesse-dark": {
+            dark: {
+              background: "#121212",
+              foreground: "#dbd7ca",
+              accent: "#4d9375",
+              chrome: "#121212",
+            },
+          },
+          "solarized-dark": {
+            dark: {
+              background: "#002b36",
+              foreground: "#839496",
+              accent: "#268bd2",
+              chrome: "#002b36",
+            },
+          },
+          "synthwave-84": {
+            dark: {
+              background: "#262335",
+              foreground: "#f4f4f4",
+              accent: "#ff7edb",
+              chrome: "#262335",
+            },
+          },
         };
         // Keep the built-in mode list in sync with the runtime so the selected
         // T3 Chat palette is visible before React has mounted.
@@ -143,6 +263,21 @@
           "t3-ocean",
           "t3-ember",
           "t3-iris",
+          "catppuccin-mocha",
+          "dracula",
+          "one-dark-pro",
+          "tokyo-night",
+          "gruvbox-dark",
+          "nord",
+          "github-dark",
+          "material-theme-palenight",
+          "rose-pine",
+          "kanagawa-dragon",
+          "everforest-dark",
+          "monokai",
+          "vitesse-dark",
+          "solarized-dark",
+          "synthwave-84",
         ];
         // Update every theme-color meta so any element another layer added
         // carries the resolved color too.
@@ -232,7 +367,11 @@
             themeModes !== null;
           const theme = isKnownTheme && storedTheme ? storedTheme : "system";
           const isThemed = isKnownTheme && themeModes !== null;
-          const baseAppearance = customTheme ? customTheme.appearance : "light";
+          const baseAppearance = customTheme
+            ? customTheme.appearance
+            : builtInModes?.length === 1
+              ? builtInModes[0]
+              : "light";
           const systemMode = prefersDark ? "dark" : "light";
           const storedAppearanceMode = window.localStorage.getItem(
             THEME_APPEARANCE_MODE_STORAGE_KEY,

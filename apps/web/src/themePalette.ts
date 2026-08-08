@@ -127,6 +127,21 @@ const RESERVED_THEME_IDS = new Set([
   "t3-ocean",
   "t3-ember",
   "t3-iris",
+  "catppuccin-mocha",
+  "dracula",
+  "one-dark-pro",
+  "tokyo-night",
+  "gruvbox-dark",
+  "nord",
+  "github-dark",
+  "material-theme-palenight",
+  "rose-pine",
+  "kanagawa-dragon",
+  "everforest-dark",
+  "monokai",
+  "vitesse-dark",
+  "solarized-dark",
+  "synthwave-84",
 ]);
 
 const customThemeListeners = new Set<() => void>();
@@ -1384,12 +1399,41 @@ export const IRIS_THEME: ThemeDefinition = {
   },
 };
 
+const CLAUDEX_THEME_SPECS = [
+  ["catppuccin-mocha", "Catppuccin Mocha", "#1e1e2e", "#cba6f7"],
+  ["dracula", "Dracula", "#282a36", "#bd93f9"],
+  ["one-dark-pro", "One Dark Pro", "#282c34", "#61afef"],
+  ["tokyo-night", "Tokyo Night", "#1a1b26", "#7aa2f7"],
+  ["gruvbox-dark", "Gruvbox Dark", "#282828", "#d79921"],
+  ["nord", "Nord", "#2e3440", "#88c0d0"],
+  ["github-dark", "GitHub Dark", "#0d1117", "#58a6ff"],
+  ["material-theme-palenight", "Material Palenight", "#292d3e", "#c792ea"],
+  ["rose-pine", "Rosé Pine", "#191724", "#c4a7e7"],
+  ["kanagawa-dragon", "Kanagawa Dragon", "#181616", "#c4b28a"],
+  ["everforest-dark", "Everforest Dark", "#2d353b", "#a7c080"],
+  ["monokai", "Monokai", "#272822", "#a6e22e"],
+  ["vitesse-dark", "Vitesse Dark", "#121212", "#4d9375"],
+  ["solarized-dark", "Solarized Dark", "#002b36", "#268bd2"],
+  ["synthwave-84", "SynthWave '84", "#262335", "#ff7edb"],
+] as const;
+
+/** Keep the original Claudex palettes valid after the theme-library migration. */
+export const CLAUDEX_THEMES: ReadonlyArray<ThemeDefinition> = CLAUDEX_THEME_SPECS.map(
+  ([id, label, background, accent]) => ({
+    id,
+    label,
+    appearance: "dark" as const,
+    colors: createManagedThemeColors("dark", background, accent, { exactSeeds: true }),
+  }),
+);
+
 const BUILT_IN_THEME_DEFINITIONS: ReadonlyArray<ThemeDefinition> = [
   T3_CHAT_THEME,
   GROVE_THEME,
   OCEAN_THEME,
   EMBER_THEME,
   IRIS_THEME,
+  ...CLAUDEX_THEMES,
 ];
 
 export function getThemeDefinition(theme: ThemePreference): ThemeDefinition | null {

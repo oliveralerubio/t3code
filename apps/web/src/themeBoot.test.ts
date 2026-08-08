@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import indexHtml from "../index.html?raw";
 import {
   CUSTOM_THEMES_STORAGE_KEY,
+  CLAUDEX_THEMES,
   getDefaultThemeColors,
   getThemeColorsForMode,
   invalidateCustomThemes,
@@ -244,6 +245,11 @@ describe("index.html boot script", () => {
       storage: { [THEME_STORAGE_KEY]: "dark", [THEME_FOLLOW_SYSTEM_STORAGE_KEY]: "false" },
       prefersDark: false,
     },
+    ...CLAUDEX_THEMES.map((theme) => ({
+      name: `${theme.id} is recognized before React mounts`,
+      storage: { [THEME_STORAGE_KEY]: theme.id },
+      prefersDark: false,
+    })),
   ];
 
   it.each(parityCases)("matches the runtime appearance: $name", ({ storage, prefersDark }) => {
@@ -300,6 +306,20 @@ describe("index.html boot script", () => {
         expect(boot.backgroundColor).toBe(colors!.chrome);
         expect(boot.metaContent).toBe(colors!.chrome);
       }
+    }
+  });
+
+  it("keeps every Claudex palette visible during boot", () => {
+    for (const theme of CLAUDEX_THEMES) {
+      const colors = getThemeColorsForMode(theme, "dark")!;
+      const boot = runBootScript({
+        storage: { [THEME_STORAGE_KEY]: theme.id },
+        prefersDark: false,
+      });
+      expect(boot.themeId).toBe(theme.id);
+      expect(boot.isDark).toBe(true);
+      expect(boot.bootVariables["--boot-background"]).toBe(colors.canvas);
+      expect(boot.bootVariables["--boot-accent"]).toBe(colors.accent);
     }
   });
 
