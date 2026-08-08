@@ -94,6 +94,8 @@ export interface PiRpcManagerOptions {
   readonly binaryPath: string;
   readonly agentDir?: string;
   readonly environment?: NodeJS.ProcessEnv;
+  readonly provider?: ProviderDriverKind;
+  readonly providerName?: string;
 }
 
 interface PendingRequest {
@@ -171,8 +173,10 @@ function modelFromState(value: unknown): string | undefined {
   return parsePiModel(record);
 }
 
-function commandError(command: string, response: PiRpcRecord): Error {
-  return new Error(stringValue(response.error) ?? `Pi RPC command '${command}' failed.`);
+function commandError(providerName: string, command: string, response: PiRpcRecord): Error {
+  return new Error(
+    stringValue(response.error) ?? `${providerName} RPC command '${command}' failed.`,
+  );
 }
 
 export class PiRpcManager {
@@ -183,6 +187,17 @@ export class PiRpcManager {
 
   constructor(options: PiRpcManagerOptions) {
     this.options = options;
+  }
+
+  private provider(): ProviderDriverKind {
+    return this.options.provider ?? ProviderDriverKind.make("pi");
+  }
+
+  private providerName(): string {
+    return (
+      this.options.providerName ??
+      (this.provider() === ProviderDriverKind.make("pi") ? "Pi" : this.provider())
+    );
   }
 
   subscribe(listener: (event: PiRpcManagerEvent) => void): () => void {
@@ -216,7 +231,7 @@ export class PiRpcManager {
       clearTimeout(pending.timeout);
       session.pending.delete(id);
       if (parsed.success === true) pending.resolve(parsed);
-      else pending.reject(commandError(pending.command, parsed));
+      else pending.reject(commandError(this.providerName(), pending.command, parsed));
       return;
     }
     if (parsed.type === "extension_ui_request") {
@@ -226,8 +241,7 @@ export class PiRpcManager {
         ...(session.turnId ? { turnId: session.turnId } : {}),
         payload: {
           type: "extension_ui_request",
-          errorMessage:
-            "Pi requested extension UI input, which T3 Code cannot answer; the session was terminated.",
+          errorMessage: `${this.providerName()} requested extension UI input, which T3 Code cannot answer; the session was terminated.`,
         },
       });
       if (this.sessions.get(session.threadId) === session) this.sessions.delete(session.threadId);
@@ -322,7 +336,7 @@ export class PiRpcManager {
     cwd: string | undefined,
     runtimeMode: RuntimeMode,
   ): SessionState {
-    // T3 Code has no Pi extension-UI bridge. Disable extension discovery so
+    // T3 Code has no provider extension-UI bridge. Disable extension discovery so
     // installed extensions cannot block an otherwise healthy RPC session.
     const args = ["--mode", "rpc", "--no-extensions"];
     if (this.options.agentDir) args.push("--session-dir", this.options.agentDir);
@@ -380,7 +394,9 @@ export class PiRpcManager {
       session.status = session.stopping ? "closed" : code === 0 ? "closed" : "error";
       this.failPending(
         session,
-        new Error(`Pi RPC process exited (${code ?? "signal"}${signal ? `:${signal}` : ""}).`),
+        new Error(
+          `${this.providerName()} RPC process exited (${code ?? "signal"}${signal ? `:${signal}` : ""}).`,
+        ),
       );
       this.emit({
         kind: "exit",
@@ -400,13 +416,16 @@ export class PiRpcManager {
     command: PiRpcRecord,
     timeoutMs = 15_000,
   ): Promise<PiRpcRecord> {
-    if (session.child.stdin.destroyed) return Promise.reject(new Error("Pi RPC stdin is closed."));
+    if (session.child.stdin.destroyed)
+      return Promise.reject(new Error(`${this.providerName()} RPC stdin is closed.`));
     const id = stringValue(command.id) ?? NodeCrypto.randomUUID();
     const payload = JSON.stringify({ ...command, id });
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         session.pending.delete(id);
-        const error = new Error(`Pi RPC command '${String(command.type)}' timed out.`);
+        const error = new Error(
+          `${this.providerName()} RPC command '${String(command.type)}' timed out.`,
+        );
         reject(error);
         if (command.type === "prompt") void this.handlePromptTimeout(session, error);
       }, timeoutMs);
@@ -424,7 +443,7 @@ export class PiRpcManager {
     session.stopping = true;
     session.child.stdout.off("data", session.listeners.stdout);
     session.child.stderr.off("data", session.listeners.stderr);
-    this.failPending(session, new Error("Pi session stopped."));
+    this.failPending(session, new Error(`${this.providerName()} session stopped.`));
     if (session.child.exitCode === null && session.child.signalCode === null)
       session.child.kill("SIGTERM");
     await new Promise<void>((resolve) => {
@@ -466,7 +485,7 @@ export class PiRpcManager {
     readonly resumeCursor?: unknown;
   }): Promise<ProviderSession> {
     if (input.runtimeMode !== "full-access")
-      throw new Error("Pi supports only full-access runtime mode.");
+      throw new Error(`${this.providerName()} supports only full-access runtime mode.`);
     await this.stopSession(input.threadId);
     const session = this.createSession(input.threadId, input.cwd, input.runtimeMode);
     this.sessions.set(input.threadId, session);
@@ -482,7 +501,7 @@ export class PiRpcManager {
       const stateRecord = await this.readState(session);
       session.status = stateRecord.isStreaming === true ? "running" : "ready";
       return {
-        provider: ProviderDriverKind.make("pi"),
+        provider: this.provider(),
         status: session.status,
         runtimeMode: session.runtimeMode,
         ...(session.cwd ? { cwd: session.cwd } : {}),
@@ -507,7 +526,7 @@ export class PiRpcManager {
   private async setModelState(session: SessionState, model: string): Promise<void> {
     const separator = model.indexOf("/");
     if (separator <= 0 || separator === model.length - 1)
-      throw new Error(`Invalid Pi model '${model}'.`);
+      throw new Error(`Invalid ${this.providerName()} model '${model}'.`);
     const response = await this.request(session, {
       type: "set_model",
       provider: model.slice(0, separator),
@@ -531,7 +550,7 @@ export class PiRpcManager {
 
   private async setThinkingState(session: SessionState, level: PiThinkingLevel): Promise<void> {
     if (session.thinkingLevels.length && !session.thinkingLevels.includes(level))
-      throw new Error(`Pi model does not support thinking level '${level}'.`);
+      throw new Error(`${this.providerName()} model does not support thinking level '${level}'.`);
     await this.request(session, { type: "set_thinking_level", level });
     await this.readState(session);
   }
@@ -548,14 +567,19 @@ export class PiRpcManager {
     }>;
   }): Promise<ProviderTurnStartResult> {
     const session = this.sessions.get(input.threadId);
-    if (!session) throw new Error(`Unknown Pi RPC thread '${input.threadId}'.`);
+    if (!session) throw new Error(`Unknown ${this.providerName()} RPC thread '${input.threadId}'.`);
     if (session.status === "error" || session.stopping)
-      throw new Error("Pi session is not accepting turns after a failed request.");
-    if (session.promptPending) throw new Error("Pi prompt acceptance is still pending.");
+      throw new Error(
+        `${this.providerName()} session is not accepting turns after a failed request.`,
+      );
+    if (session.promptPending)
+      throw new Error(`${this.providerName()} prompt acceptance is still pending.`);
     if (session.turnId && input.model && input.model !== session.model)
-      throw new Error("Pi cannot change models while a turn is running.");
+      throw new Error(`${this.providerName()} cannot change models while a turn is running.`);
     if (session.turnId && input.thinkingLevel && input.thinkingLevel !== session.thinkingLevel)
-      throw new Error("Pi cannot change thinking levels while a turn is running.");
+      throw new Error(
+        `${this.providerName()} cannot change thinking levels while a turn is running.`,
+      );
     if (!session.turnId && input.model && input.model !== session.model)
       await this.setModelState(session, input.model);
     if (!session.turnId && input.thinkingLevel && input.thinkingLevel !== session.thinkingLevel)
@@ -589,7 +613,7 @@ export class PiRpcManager {
 
   async interruptTurn(threadId: ThreadId): Promise<void> {
     const session = this.sessions.get(threadId);
-    if (!session) throw new Error(`Unknown Pi RPC thread '${threadId}'.`);
+    if (!session) throw new Error(`Unknown ${this.providerName()} RPC thread '${threadId}'.`);
     await this.request(session, { type: "abort" });
   }
 
@@ -607,7 +631,7 @@ export class PiRpcManager {
 
   listSessions(): ReadonlyArray<ProviderSession> {
     return [...this.sessions.values()].map((session) => ({
-      provider: ProviderDriverKind.make("pi"),
+      provider: this.provider(),
       status: session.status,
       runtimeMode: session.runtimeMode,
       ...(session.cwd ? { cwd: session.cwd } : {}),

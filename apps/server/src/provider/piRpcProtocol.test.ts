@@ -2,6 +2,7 @@ import { describe, expect, it } from "@effect/vitest";
 import { ThreadId, TurnId } from "@t3tools/contracts";
 import {
   mapPiRpcEvent,
+  mapAgentRpcEvent,
   parsePiModel,
   parsePiRpcLine,
   parsePiThinkingLevel,
@@ -46,6 +47,16 @@ describe("Pi RPC protocol", () => {
       type: "turn.completed",
       payload: { state: "interrupted", stopReason: "aborted", errorMessage: "user stopped" },
     });
+  });
+
+  it("maps the shared event protocol with the Prime Agent provider kind", () => {
+    const event = mapAgentRpcEvent({
+      provider: "primeAgent" as never,
+      threadId: ThreadId.make("prime-agent-thread"),
+      turnId: TurnId.make("prime-agent-turn"),
+      event: { type: "turn_start" },
+    })[0];
+    expect(event).toMatchObject({ type: "turn.started", provider: "primeAgent" });
   });
 
   it("uses Pi message identity to separate assistant segments", () => {

@@ -16,7 +16,9 @@ import {
   OpenAI,
   OpenCodeIcon,
   PiAgentIcon,
+  PrimeAgentIcon,
 } from "../Icons";
+import { PrimeAgentSettings } from "@t3tools/contracts";
 
 type ProviderSettingsSchema = {
   readonly fields: Readonly<Record<string, Schema.Top>>;
@@ -81,6 +83,12 @@ export const PROVIDER_CLIENT_DEFINITIONS: readonly ProviderClientDefinition[] = 
     label: "Pi",
     icon: PiAgentIcon,
     settingsSchema: PiSettings,
+  },
+  {
+    value: ProviderDriverKind.make("primeAgent"),
+    label: "Prime Agent",
+    icon: PrimeAgentIcon,
+    settingsSchema: PrimeAgentSettings,
   },
 ];
 

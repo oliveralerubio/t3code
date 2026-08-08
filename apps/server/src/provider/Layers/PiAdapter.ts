@@ -27,11 +27,10 @@ import {
 } from "../Errors.ts";
 import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
 import { PiRpcManager, type PiRpcManagerEvent } from "../piRpcManager.ts";
-import { mapPiRpcEvent } from "../piRpcProtocol.ts";
-
-const PROVIDER = "pi" as const;
+import { mapAgentRpcEvent } from "../piRpcProtocol.ts";
 
 function base(
+  provider: ProviderDriverKind,
   threadId: ThreadId,
   instanceId: ProviderInstanceId,
   turnId?: TurnId,
@@ -39,7 +38,7 @@ function base(
 ) {
   return {
     eventId: EventId.make(NodeCrypto.randomUUID()),
-    provider: ProviderDriverKind.make(PROVIDER),
+    provider,
     providerInstanceId: instanceId,
     threadId,
     createdAt: new Date().toISOString(),
@@ -55,9 +54,12 @@ function errorMessage(cause: unknown, fallback: string): string {
 function mapManagerEvent(
   event: PiRpcManagerEvent,
   instanceId: ProviderInstanceId,
+  provider: ProviderDriverKind,
+  providerName: string,
 ): ReadonlyArray<ProviderRuntimeEvent> {
   if (event.kind === "rpc-event")
-    return mapPiRpcEvent({
+    return mapAgentRpcEvent({
+      provider,
       threadId: event.threadId,
       ...(event.turnId ? { turnId: event.turnId } : {}),
       event: event.payload,
@@ -66,26 +68,29 @@ function mapManagerEvent(
     return [
       {
         type: "runtime.warning",
-        ...base(event.threadId, instanceId, event.turnId),
-        payload: { message: event.line || "Pi RPC stderr output" },
+        ...base(provider, event.threadId, instanceId, event.turnId),
+        payload: { message: event.line || `${providerName} RPC stderr output` },
       } as ProviderRuntimeEvent,
     ];
   if (event.kind === "stdout-parse-error")
     return [
       {
         type: "runtime.warning",
-        ...base(event.threadId, instanceId),
-        payload: { message: "Pi RPC emitted malformed JSON.", detail: { line: event.line } },
+        ...base(provider, event.threadId, instanceId),
+        payload: {
+          message: `${providerName} RPC emitted malformed JSON.`,
+          detail: { line: event.line },
+        },
       } as ProviderRuntimeEvent,
     ];
   return [
     {
       type: event.expected ? "session.exited" : "runtime.error",
-      ...base(event.threadId, instanceId, event.turnId),
+      ...base(provider, event.threadId, instanceId, event.turnId),
       payload: event.expected
-        ? { reason: "Pi session stopped", recoverable: true, exitKind: "graceful" }
+        ? { reason: `${providerName} session stopped`, recoverable: true, exitKind: "graceful" }
         : {
-            message: `Pi RPC process exited unexpectedly (${event.code ?? "signal"}${event.signal ? `:${event.signal}` : ""}).`,
+            message: `${providerName} RPC process exited unexpectedly (${event.code ?? "signal"}${event.signal ? `:${event.signal}` : ""}).`,
             class: "transport_error",
           },
     } as ProviderRuntimeEvent,
@@ -97,10 +102,14 @@ export interface PiAdapterOptions {
   readonly binaryPath: string;
   readonly agentDir?: string;
   readonly environment?: NodeJS.ProcessEnv;
+  readonly provider?: ProviderDriverKind;
+  readonly providerName?: string;
 }
 
-export const makePiAdapter = (options: PiAdapterOptions) =>
+export const makeAgentAdapter = (options: PiAdapterOptions) =>
   Effect.gen(function* () {
+    const provider = options.provider ?? ProviderDriverKind.make("pi");
+    const providerName = options.providerName ?? provider;
     const fileSystem = yield* FileSystem.FileSystem;
     const serverConfig = yield* ServerConfig;
     const manager = yield* Effect.acquireRelease(
@@ -111,7 +120,12 @@ export const makePiAdapter = (options: PiAdapterOptions) =>
     yield* Effect.acquireRelease(
       Effect.sync(() =>
         manager.subscribe((event) =>
-          Effect.runFork(Queue.offerAll(queue, mapManagerEvent(event, options.instanceId))),
+          Effect.runFork(
+            Queue.offerAll(
+              queue,
+              mapManagerEvent(event, options.instanceId, provider, providerName),
+            ),
+          ),
         ),
       ),
       (unsubscribe) => Effect.sync(unsubscribe),
@@ -140,9 +154,9 @@ export const makePiAdapter = (options: PiAdapterOptions) =>
           }),
         catch: (cause) =>
           new ProviderAdapterProcessError({
-            provider: PROVIDER,
+            provider,
             threadId: input.threadId,
-            detail: errorMessage(cause, "Failed to start Pi session."),
+            detail: errorMessage(cause, `Failed to start ${providerName} session.`),
             cause,
           }),
       });
@@ -156,7 +170,7 @@ export const makePiAdapter = (options: PiAdapterOptions) =>
             });
             if (!path)
               return yield* new ProviderAdapterValidationError({
-                provider: PROVIDER,
+                provider,
                 operation: "sendTurn",
                 issue: `Invalid attachment '${attachment.id}'.`,
               });
@@ -164,7 +178,7 @@ export const makePiAdapter = (options: PiAdapterOptions) =>
               Effect.mapError(
                 (cause) =>
                   new ProviderAdapterRequestError({
-                    provider: PROVIDER,
+                    provider,
                     method: "turn/prompt",
                     detail: errorMessage(cause, "Unable to read image attachment."),
                     cause,
@@ -197,9 +211,9 @@ export const makePiAdapter = (options: PiAdapterOptions) =>
             }),
           catch: (cause) =>
             new ProviderAdapterRequestError({
-              provider: PROVIDER,
+              provider,
               method: "turn/prompt",
-              detail: errorMessage(cause, "Pi prompt failed."),
+              detail: errorMessage(cause, `${providerName} prompt failed.`),
               cause,
             }),
         });
@@ -209,14 +223,14 @@ export const makePiAdapter = (options: PiAdapterOptions) =>
         try: action,
         catch: (cause) =>
           new ProviderAdapterRequestError({
-            provider: PROVIDER,
+            provider,
             method,
             detail: errorMessage(cause, `${method} failed.`),
             cause,
           }),
       });
     return {
-      provider: ProviderDriverKind.make(PROVIDER),
+      provider,
       capabilities: { sessionModelSwitch: "in-session" },
       startSession,
       sendTurn,
@@ -225,17 +239,17 @@ export const makePiAdapter = (options: PiAdapterOptions) =>
       respondToRequest: (threadId: ThreadId) =>
         Effect.fail(
           new ProviderAdapterValidationError({
-            provider: PROVIDER,
+            provider,
             operation: "respondToRequest",
-            issue: `Pi does not expose approval requests for '${threadId}'.`,
+            issue: `${providerName} does not expose approval requests for '${threadId}'.`,
           }),
         ),
       respondToUserInput: (threadId: ThreadId) =>
         Effect.fail(
           new ProviderAdapterValidationError({
-            provider: PROVIDER,
+            provider,
             operation: "respondToUserInput",
-            issue: `Pi does not expose structured user input for '${threadId}'.`,
+            issue: `${providerName} does not expose structured user input for '${threadId}'.`,
           }),
         ),
       stopSession: (threadId: ThreadId) =>
@@ -243,16 +257,19 @@ export const makePiAdapter = (options: PiAdapterOptions) =>
       listSessions: () => Effect.sync(() => manager.listSessions()),
       hasSession: (threadId: ThreadId) => Effect.sync(() => manager.hasSession(threadId)),
       readThread: (threadId: ThreadId) =>
-        Effect.fail(new ProviderAdapterSessionNotFoundError({ provider: PROVIDER, threadId })),
+        Effect.fail(new ProviderAdapterSessionNotFoundError({ provider, threadId })),
       rollbackThread: (threadId: ThreadId) =>
         Effect.fail(
           new ProviderAdapterValidationError({
-            provider: PROVIDER,
+            provider,
             operation: "rollbackThread",
-            issue: `Pi does not expose rollback for '${threadId}'.`,
+            issue: `${providerName} does not expose rollback for '${threadId}'.`,
           }),
         ),
       stopAll: () => Effect.promise(() => manager.stopAll()),
       streamEvents: Stream.fromQueue(queue),
     } satisfies ProviderAdapterShape<ProviderAdapterError>;
   });
+
+export const makePiAdapter = (options: PiAdapterOptions) =>
+  makeAgentAdapter({ ...options, provider: ProviderDriverKind.make("pi"), providerName: "Pi" });
