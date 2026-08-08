@@ -2,21 +2,64 @@
 import * as NodeCrypto from "node:crypto";
 import * as NodeChildProcess from "node:child_process";
 import {
+  PI_THINKING_LEVEL_OPTIONS,
   ProviderDriverKind,
   ThreadId,
   TurnId,
   type PiThinkingLevel,
+  type ModelCapabilities,
   type ProviderSession,
   type ProviderTurnStartResult,
   type RuntimeMode,
   type ServerProviderModel,
 } from "@t3tools/contracts";
+import { createModelCapabilities } from "@t3tools/shared/model";
 import {
   parsePiModel,
   parsePiRpcLine,
   parsePiThinkingLevel,
   type PiRpcRecord,
 } from "./piRpcProtocol.ts";
+
+function thinkingLevelLabel(level: PiThinkingLevel): string {
+  return level === "xhigh" ? "Extra high" : level.charAt(0).toUpperCase() + level.slice(1);
+}
+
+export function piModelCapabilities(): ModelCapabilities {
+  return createModelCapabilities({
+    optionDescriptors: [
+      {
+        id: "thinkingLevel",
+        label: "Thinking",
+        type: "select",
+        options: PI_THINKING_LEVEL_OPTIONS.map((level) => ({
+          id: level,
+          label: thinkingLevelLabel(level),
+        })),
+      },
+    ],
+  });
+}
+
+export function mapPiAvailableModels(
+  models: ReadonlyArray<unknown>,
+): ReadonlyArray<ServerProviderModel> {
+  const seen = new Set<string>();
+  return models.flatMap((model) => {
+    const slug = parsePiModel(model);
+    if (!slug || seen.has(slug)) return [];
+    seen.add(slug);
+    const record = model && typeof model === "object" ? (model as PiRpcRecord) : {};
+    return [
+      {
+        slug,
+        name: stringValue(record.name) ?? slug,
+        isCustom: false,
+        capabilities: piModelCapabilities(),
+      },
+    ];
+  });
+}
 
 export type PiRpcManagerEvent =
   | {
@@ -420,21 +463,7 @@ export class PiRpcManager {
       const data =
         response.data && typeof response.data === "object" ? (response.data as PiRpcRecord) : {};
       const models = Array.isArray(data.models) ? data.models : [];
-      const seen = new Set<string>();
-      return models.flatMap((model) => {
-        const slug = parsePiModel(model);
-        if (!slug || seen.has(slug)) return [];
-        seen.add(slug);
-        const record = model && typeof model === "object" ? (model as PiRpcRecord) : {};
-        return [
-          {
-            slug,
-            name: stringValue(record.name) ?? slug,
-            isCustom: false,
-            capabilities: { optionDescriptors: [] },
-          },
-        ];
-      });
+      return mapPiAvailableModels(models);
     } finally {
       await this.stopSessionState(session);
     }
