@@ -1,6 +1,7 @@
 // @effect-diagnostics globalDate:off cryptoRandomUUID:off
 import {
   EventId,
+  PI_THINKING_LEVEL_OPTIONS,
   ProviderDriverKind,
   RuntimeItemId,
   type PiThinkingLevel,
@@ -102,13 +103,11 @@ function assistantItemId(
 export function piThinkingLevelsFromModel(value: unknown): ReadonlyArray<PiThinkingLevel> {
   const model = asRecord(value);
   const map = asRecord(model?.thinkingLevelMap);
-  if (map) {
-    return Object.keys(map).flatMap((level) => {
-      const parsed = parsePiThinkingLevel(level);
-      return parsed && map[level] !== null ? [parsed] : [];
-    });
+  if (model?.reasoning === false) return ["off"];
+  if (map || model?.reasoning === true) {
+    return PI_THINKING_LEVEL_OPTIONS.filter((level) => map?.[level] !== null);
   }
-  return model?.reasoning === false ? ["off"] : [];
+  return [];
 }
 export const agentThinkingLevelsFromModel = piThinkingLevelsFromModel;
 

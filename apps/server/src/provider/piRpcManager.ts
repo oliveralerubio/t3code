@@ -50,20 +50,46 @@ export function mapPiAvailableModels(
   models: ReadonlyArray<unknown>,
 ): ReadonlyArray<ServerProviderModel> {
   const seen = new Set<string>();
-  return models.flatMap((model) => {
+  const parsedModels = models.flatMap((model) => {
     const slug = parsePiModel(model);
     if (!slug || seen.has(slug)) return [];
     seen.add(slug);
     const record = model && typeof model === "object" ? (model as PiRpcRecord) : {};
+    const provider = stringValue(record.provider);
     return [
       {
         slug,
         name: stringValue(record.name) ?? slug,
+        ...(provider ? { provider } : {}),
         isCustom: false,
         capabilities: piModelCapabilities(piThinkingLevelsFromModel(record)),
       },
     ];
   });
+
+  const nameCounts = new Map<string, number>();
+  for (const model of parsedModels) {
+    nameCounts.set(model.name, (nameCounts.get(model.name) ?? 0) + 1);
+  }
+
+  return parsedModels.map(({ provider, ...model }) => {
+    const subProvider = provider ? formatProviderName(provider) : undefined;
+    const name =
+      subProvider && (nameCounts.get(model.name) ?? 0) > 1
+        ? `${model.name} (${subProvider})`
+        : model.name;
+    return {
+      ...model,
+      name,
+      ...(subProvider ? { subProvider } : {}),
+    };
+  });
+}
+
+function formatProviderName(provider: string): string {
+  if (provider === "openai-codex") return "OpenAI Codex";
+  if (provider === "prime-inference") return "Prime Inference";
+  return provider.replace(/[-_]+/g, " ").replace(/\b\w/g, (character) => character.toUpperCase());
 }
 
 export type PiRpcManagerEvent =

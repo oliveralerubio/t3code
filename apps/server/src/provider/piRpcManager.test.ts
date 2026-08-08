@@ -53,6 +53,30 @@ describe("PiRpcManager lifecycle", () => {
     expect(descriptor.options.map((option) => option.id)).toEqual(["off", "high"]);
   });
 
+  it("disambiguates duplicate model names by upstream provider", () => {
+    expect(
+      mapPiAvailableModels([
+        {
+          provider: "openai-codex",
+          modelId: "gpt-5.6-luna",
+          name: "GPT 5.6 Luna",
+          reasoning: true,
+          thinkingLevelMap: { xhigh: "xhigh", minimal: null, max: "max" },
+        },
+        {
+          provider: "prime-inference",
+          modelId: "openai/gpt-5.6-luna",
+          name: "GPT 5.6 Luna",
+          reasoning: true,
+          thinkingLevelMap: { xhigh: "xhigh", minimal: null, max: "max" },
+        },
+      ]).map((model) => ({ name: model.name, subProvider: model.subProvider })),
+    ).toEqual([
+      { name: "GPT 5.6 Luna (OpenAI Codex)", subProvider: "OpenAI Codex" },
+      { name: "GPT 5.6 Luna (Prime Inference)", subProvider: "Prime Inference" },
+    ]);
+  });
+
   it("preserves split UTF-8 code points across stream chunks", () => {
     const bytes = Buffer.from("Pi ✓ café", "utf8");
     expect(
