@@ -160,19 +160,17 @@ export const makePiAdapter = (options: PiAdapterOptions) =>
                 operation: "sendTurn",
                 issue: `Invalid attachment '${attachment.id}'.`,
               });
-            const bytes = yield* fileSystem
-              .readFile(path)
-              .pipe(
-                Effect.mapError(
-                  (cause) =>
-                    new ProviderAdapterRequestError({
-                      provider: PROVIDER,
-                      method: "turn/prompt",
-                      detail: errorMessage(cause, "Unable to read image attachment."),
-                      cause,
-                    }),
-                ),
-              );
+            const bytes = yield* fileSystem.readFile(path).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapterRequestError({
+                    provider: PROVIDER,
+                    method: "turn/prompt",
+                    detail: errorMessage(cause, "Unable to read image attachment."),
+                    cause,
+                  }),
+              ),
+            );
             return {
               type: "image" as const,
               data: Buffer.from(bytes).toString("base64"),
