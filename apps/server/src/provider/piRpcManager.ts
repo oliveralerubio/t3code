@@ -500,8 +500,9 @@ export class PiRpcManager {
         1_000,
       );
       const data = response.data && typeof response.data === "object" ? response.data : {};
-      session.thinkingLevels = Array.isArray((data as PiRpcRecord).levels)
-        ? (data as PiRpcRecord).levels.flatMap((level) => {
+      const levels = (data as PiRpcRecord).levels;
+      session.thinkingLevels = Array.isArray(levels)
+        ? levels.flatMap((level: unknown) => {
             const parsed = parsePiThinkingLevel(level);
             return parsed ? [parsed] : [];
           })
