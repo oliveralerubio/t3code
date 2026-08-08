@@ -13,11 +13,15 @@ describe("PiRpcManager lifecycle", () => {
   });
 
   it("publishes Pi thinking levels and does not invent a model when discovery is empty", () => {
-    const descriptor = piModelCapabilities().optionDescriptors[0];
+    const descriptor = piModelCapabilities().optionDescriptors.find(
+      (candidate) => candidate.id === "thinkingLevel",
+    );
 
     expect(descriptor?.type).toBe("select");
-    expect(descriptor?.id).toBe("thinkingLevel");
-    expect(descriptor?.options.map((option) => option.id)).toEqual([...PI_THINKING_LEVEL_OPTIONS]);
+    if (descriptor === undefined || descriptor.type !== "select") {
+      throw new Error("Expected a Pi thinking-level select descriptor.");
+    }
+    expect(descriptor.options.map((option) => option.id)).toEqual([...PI_THINKING_LEVEL_OPTIONS]);
     expect(mapPiAvailableModels([])).toEqual([]);
   });
 });
