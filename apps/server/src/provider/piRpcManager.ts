@@ -165,6 +165,16 @@ function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+export function buildPiRpcArgs(input: {
+  readonly offline?: boolean;
+  readonly agentDir?: string;
+}): ReadonlyArray<string> {
+  const args = input.offline ? ["--offline"] : [];
+  args.push("--mode", "rpc", "--no-extensions");
+  if (input.agentDir) args.push("--session-dir", input.agentDir);
+  return args;
+}
+
 export function decodePiUtf8Chunks(chunks: ReadonlyArray<Buffer>): string {
   const decoder = new NodeStringDecoder.StringDecoder("utf8");
   return chunks.map((chunk) => decoder.write(chunk)).join("") + decoder.end();
@@ -361,11 +371,14 @@ export class PiRpcManager {
     threadId: ThreadId,
     cwd: string | undefined,
     runtimeMode: RuntimeMode,
+    options?: { readonly offline?: boolean },
   ): SessionState {
     // T3 Code has no provider extension-UI bridge. Disable extension discovery so
     // installed extensions cannot block an otherwise healthy RPC session.
-    const args = ["--mode", "rpc", "--no-extensions"];
-    if (this.options.agentDir) args.push("--session-dir", this.options.agentDir);
+    const args = buildPiRpcArgs({
+      ...(options?.offline ? { offline: true } : {}),
+      ...(this.options.agentDir ? { agentDir: this.options.agentDir } : {}),
+    });
     const child = NodeChildProcess.spawn(this.options.binaryPath, args, {
       cwd,
       env: { ...process.env, ...this.options.environment },
@@ -674,7 +687,9 @@ export class PiRpcManager {
 
   async discoverModels(cwd?: string): Promise<ReadonlyArray<ServerProviderModel>> {
     const threadId = ThreadId.make(NodeCrypto.randomUUID());
-    const session = this.createSession(threadId, cwd, "full-access");
+    // Model discovery only needs Pi's local catalog. Offline mode prevents Pi
+    // from waiting on remote catalog/auth refreshes before it can answer RPC.
+    const session = this.createSession(threadId, cwd, "full-access", { offline: true });
     try {
       const response = await this.request(session, { type: "get_available_models" });
       const data =

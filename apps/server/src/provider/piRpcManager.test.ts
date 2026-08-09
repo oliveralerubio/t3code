@@ -2,6 +2,7 @@ import { describe, expect, it } from "@effect/vitest";
 import { ThreadId } from "@t3tools/contracts";
 import {
   decodePiUtf8Chunks,
+  buildPiRpcArgs,
   buildPiPromptCommand,
   deletePiSessionIfCurrent,
   mapPiAvailableModels,
@@ -10,6 +11,22 @@ import {
 } from "./piRpcManager.ts";
 
 describe("PiRpcManager lifecycle", () => {
+  it("uses offline startup for model discovery without changing interactive sessions", () => {
+    expect(buildPiRpcArgs({ offline: true })).toEqual([
+      "--offline",
+      "--mode",
+      "rpc",
+      "--no-extensions",
+    ]);
+    expect(buildPiRpcArgs({ agentDir: "/tmp/pi-sessions" })).toEqual([
+      "--mode",
+      "rpc",
+      "--no-extensions",
+      "--session-dir",
+      "/tmp/pi-sessions",
+    ]);
+  });
+
   it("removes a session when the configured binary cannot start", async () => {
     const manager = new PiRpcManager({ binaryPath: "/definitely/missing/pi" });
     const threadId = ThreadId.make("pi-cleanup-test");
