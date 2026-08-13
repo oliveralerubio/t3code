@@ -3,6 +3,7 @@ import {
   CodexSettings,
   CursorSettings,
   GrokSettings,
+  AntigravitySettings,
   OpenCodeSettings,
   PiSettings,
   ProviderDriverKind,
@@ -12,6 +13,7 @@ import {
   ClaudeAI,
   CursorIcon,
   GrokIcon,
+  AntigravityIcon,
   type Icon,
   OpenAI,
   OpenCodeIcon,
@@ -89,6 +91,12 @@ export const PROVIDER_CLIENT_DEFINITIONS: readonly ProviderClientDefinition[] = 
     label: "Prime Agent",
     icon: PrimeAgentIcon,
     settingsSchema: PrimeAgentSettings,
+  },
+  {
+    value: ProviderDriverKind.make("antigravity"),
+    label: "Antigravity",
+    icon: AntigravityIcon,
+    settingsSchema: AntigravitySettings,
   },
 ];
 
