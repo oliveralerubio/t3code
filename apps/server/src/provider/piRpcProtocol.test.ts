@@ -1,4 +1,4 @@
-import { describe, expect, it } from "@effect/vitest";
+import { describe, expect, it } from "vite-plus/test";
 import { ThreadId, TurnId } from "@t3tools/contracts";
 import {
   mapPiRpcEvent,
@@ -103,6 +103,38 @@ describe("Pi RPC protocol", () => {
       },
     })[0];
     expect(first?.itemId).not.toBe(second?.itemId);
+  });
+
+  it("preserves text and thinking stream kinds for incremental deltas", () => {
+    const input = { threadId: ThreadId.make("pi-thread"), turnId: TurnId.make("pi-turn") };
+    expect(
+      mapPiRpcEvent({
+        ...input,
+        event: {
+          type: "message_update",
+          piAssistantSequence: 7,
+          assistantMessageEvent: { type: "text_delta", delta: "visible" },
+        },
+      })[0],
+    ).toMatchObject({
+      type: "content.delta",
+      itemId: "pi-assistant:pi-thread:pi-turn:7",
+      payload: { streamKind: "assistant_text", delta: "visible" },
+    });
+    expect(
+      mapPiRpcEvent({
+        ...input,
+        event: {
+          type: "message_update",
+          piAssistantSequence: 7,
+          assistantMessageEvent: { type: "thinking_delta", delta: "reasoning" },
+        },
+      })[0],
+    ).toMatchObject({
+      type: "content.delta",
+      itemId: "pi-assistant:pi-thread:pi-turn:7",
+      payload: { streamKind: "reasoning_text", delta: "reasoning" },
+    });
   });
 
   it("derives Pi thinking levels from model metadata", () => {

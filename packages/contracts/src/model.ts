@@ -152,6 +152,7 @@ const GROK_DRIVER_KIND = ProviderDriverKind.make("grok");
 const OPENCODE_DRIVER_KIND = ProviderDriverKind.make("opencode");
 const PI_DRIVER_KIND = ProviderDriverKind.make("pi");
 const PRIME_AGENT_DRIVER_KIND = ProviderDriverKind.make("primeAgent");
+const ANTIGRAVITY_DRIVER_KIND = ProviderDriverKind.make("antigravity");
 
 export const DEFAULT_MODEL = "gpt-5.6-sol";
 
@@ -175,6 +176,7 @@ export const DEFAULT_MODEL_BY_PROVIDER: Partial<Record<ProviderDriverKind, strin
   [OPENCODE_DRIVER_KIND]: "openai/gpt-5",
   [PI_DRIVER_KIND]: undefined,
   [PRIME_AGENT_DRIVER_KIND]: undefined,
+  [ANTIGRAVITY_DRIVER_KIND]: "gemini-3.6-flash-high",
 };
 
 /** Per-provider text generation model defaults. */
@@ -187,6 +189,7 @@ export const DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER: Partial<
   [OPENCODE_DRIVER_KIND]: "openai/gpt-5",
   [PI_DRIVER_KIND]: undefined,
   [PRIME_AGENT_DRIVER_KIND]: undefined,
+  [ANTIGRAVITY_DRIVER_KIND]: "gemini-3.6-flash-high",
 };
 
 export const MODEL_SLUG_ALIASES_BY_PROVIDER: Partial<
@@ -238,6 +241,7 @@ export const MODEL_SLUG_ALIASES_BY_PROVIDER: Partial<
   [OPENCODE_DRIVER_KIND]: {},
   [PI_DRIVER_KIND]: {},
   [PRIME_AGENT_DRIVER_KIND]: {},
+  [ANTIGRAVITY_DRIVER_KIND]: {},
 };
 
 // ── Provider display names ────────────────────────────────────────────
@@ -250,4 +254,5 @@ export const PROVIDER_DISPLAY_NAMES: Partial<Record<ProviderDriverKind, string>>
   [OPENCODE_DRIVER_KIND]: "OpenCode",
   [PI_DRIVER_KIND]: "Pi",
   [PRIME_AGENT_DRIVER_KIND]: "Prime Agent",
+  [ANTIGRAVITY_DRIVER_KIND]: "Antigravity",
 };

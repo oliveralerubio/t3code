@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { PiSettings, PrimeAgentSettings, ProviderDriverKind } from "@t3tools/contracts";
-import { PiAgentIcon, PrimeAgentIcon } from "../Icons";
+import {
+  AntigravitySettings,
+  PiSettings,
+  PrimeAgentSettings,
+  ProviderDriverKind,
+} from "@t3tools/contracts";
+import { AntigravityIcon, PiAgentIcon, PrimeAgentIcon } from "../Icons";
 import { getDriverOption } from "./providerDriverMeta";
 
 describe("provider driver metadata", () => {
@@ -20,5 +25,12 @@ describe("provider driver metadata", () => {
     expect(option?.label).toBe("Prime Agent");
     expect(option?.icon).toBe(PrimeAgentIcon);
     expect(option?.settingsSchema).toBe(PrimeAgentSettings);
+  });
+
+  it("exposes Antigravity with the direct CLI setting", () => {
+    const option = getDriverOption(ProviderDriverKind.make("antigravity"));
+    expect(option?.label).toBe("Antigravity");
+    expect(option?.icon).toBe(AntigravityIcon);
+    expect(option?.settingsSchema).toBe(AntigravitySettings);
   });
 });

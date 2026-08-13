@@ -289,9 +289,13 @@ export class PiRpcManager {
     const isAssistantMessage = eventMessage?.role === "assistant";
     if (parsed.type === "message_start" && isAssistantMessage)
       session.activeAssistantSequence = session.assistantMessageSequence++;
-    const assistantSequence = isAssistantMessage
-      ? (session.activeAssistantSequence ??= session.assistantMessageSequence++)
-      : undefined;
+    // Pi puts streaming deltas in `assistantMessageEvent`, not `message`.
+    // Carry the active message identity across those events so text and
+    // thinking deltas remain attached to the same assistant segment.
+    const assistantSequence =
+      isAssistantMessage || parsed.type === "message_update"
+        ? (session.activeAssistantSequence ??= session.assistantMessageSequence++)
+        : undefined;
     const event =
       assistantSequence === undefined
         ? parsed
