@@ -176,7 +176,7 @@ export const DEFAULT_MODEL_BY_PROVIDER: Partial<Record<ProviderDriverKind, strin
   [OPENCODE_DRIVER_KIND]: "openai/gpt-5",
   [PI_DRIVER_KIND]: undefined,
   [PRIME_AGENT_DRIVER_KIND]: undefined,
-  [ANTIGRAVITY_DRIVER_KIND]: "gemini-3.6-flash-high",
+  [ANTIGRAVITY_DRIVER_KIND]: "gemini-3.7-flash-high",
 };
 
 /** Per-provider text generation model defaults. */
@@ -189,7 +189,7 @@ export const DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER: Partial<
   [OPENCODE_DRIVER_KIND]: "openai/gpt-5",
   [PI_DRIVER_KIND]: undefined,
   [PRIME_AGENT_DRIVER_KIND]: undefined,
-  [ANTIGRAVITY_DRIVER_KIND]: "gemini-3.6-flash-high",
+  [ANTIGRAVITY_DRIVER_KIND]: "gemini-3.7-flash-high",
 };
 
 export const MODEL_SLUG_ALIASES_BY_PROVIDER: Partial<

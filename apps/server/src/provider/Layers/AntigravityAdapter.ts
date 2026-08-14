@@ -32,6 +32,7 @@ import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
 
 const PROVIDER = ProviderDriverKind.make("antigravity");
 const ASSISTANT_ITEM = `${PROVIDER}-assistant`;
+const MAX_STDERR_BYTES = 16 * 1024;
 
 export function parseAntigravityStreamJsonLine(
   line: string,
@@ -41,7 +42,12 @@ export function parseAntigravityStreamJsonLine(
     const value: unknown = JSON.parse(line);
     if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
     const record = value as Record<string, unknown>;
-    const recordType = typeof record.type === "string" ? record.type : undefined;
+    const recordType =
+      typeof record.type === "string"
+        ? record.type
+        : typeof record.event === "string"
+          ? record.event
+          : undefined;
     if (recordType === "step_update" && record.step_type === "agent_response") {
       for (const key of ["text_delta", "delta", "text", "response"]) {
         const text = record[key];
@@ -49,6 +55,18 @@ export function parseAntigravityStreamJsonLine(
       }
     }
     if (recordType === "result") {
+      const nestedResult = record.result;
+      if (nestedResult && typeof nestedResult === "object" && !Array.isArray(nestedResult)) {
+        const nested = nestedResult as Record<string, unknown>;
+        for (const key of ["response", "text", "result"]) {
+          const response = nested[key];
+          if (typeof response === "string" && response) {
+            return response.startsWith(previousText)
+              ? response.slice(previousText.length) || undefined
+              : response;
+          }
+        }
+      }
       for (const key of ["response", "text", "result"]) {
         const response = record[key];
         if (typeof response === "string" && response) {
@@ -93,6 +111,34 @@ export function parseAntigravityStreamJsonLine(
     return snapshot && snapshot.startsWith(previousText)
       ? snapshot.slice(previousText.length) || undefined
       : snapshot || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function parseAntigravityStreamJsonErrorLine(line: string): string | undefined {
+  try {
+    const value: unknown = JSON.parse(line);
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const record = value as Record<string, unknown>;
+    const recordType =
+      typeof record.type === "string"
+        ? record.type
+        : typeof record.event === "string"
+          ? record.event
+          : undefined;
+    if (recordType !== "result") return undefined;
+    const result =
+      record.result && typeof record.result === "object" && !Array.isArray(record.result)
+        ? (record.result as Record<string, unknown>)
+        : record;
+    const status = typeof result.status === "string" ? result.status.toLowerCase() : undefined;
+    if (status !== "error" && status !== "failed") return undefined;
+    for (const key of ["error", "message", "detail"]) {
+      const detail = result[key];
+      if (typeof detail === "string" && detail.trim()) return detail.trim();
+    }
+    return `status=${status}`;
   } catch {
     return undefined;
   }
@@ -230,12 +276,18 @@ export function makeAntigravityAdapter(options: AntigravityAdapterOptions) {
           });
           session.child = child;
           const decoder = new NodeStringDecoder.StringDecoder("utf8");
+          const stderrDecoder = new NodeStringDecoder.StringDecoder("utf8");
           let stdoutBuffer = "";
+          let streamError: string | undefined;
+          let stderrBuffer = "";
+          let stderrBytes = 0;
+          let stderrTruncated = false;
           const consume = (chunk: Buffer, flush = false) => {
             stdoutBuffer += decoder.write(chunk);
             const lines = stdoutBuffer.split("\n");
             stdoutBuffer = flush ? "" : (lines.pop() ?? "");
             for (const line of lines) {
+              streamError = parseAntigravityStreamJsonErrorLine(line) ?? streamError;
               const delta = parseAntigravityStreamJsonLine(
                 line.endsWith("\r") ? line.slice(0, -1) : line,
                 session.text,
@@ -246,15 +298,27 @@ export function makeAntigravityAdapter(options: AntigravityAdapterOptions) {
           child.stdout.on("data", (chunk: Buffer) => {
             consume(chunk);
           });
-          child.stderr.on("data", () => undefined);
+          child.stderr.on("data", (chunk: Buffer) => {
+            if (stderrBytes >= MAX_STDERR_BYTES) {
+              stderrTruncated = true;
+              return;
+            }
+            const remaining = MAX_STDERR_BYTES - stderrBytes;
+            const accepted = chunk.byteLength > remaining ? chunk.subarray(0, remaining) : chunk;
+            stderrBytes += accepted.byteLength;
+            stderrBuffer += stderrDecoder.write(accepted);
+            if (accepted.byteLength < chunk.byteLength) stderrTruncated = true;
+          });
           child.once("error", (cause) =>
             finishFailure(session, turnId, cause instanceof Error ? cause.message : String(cause)),
           );
           child.once("close", (code, signal) => {
+            stderrBuffer += stderrDecoder.end();
             stdoutBuffer += decoder.end();
             const finalLines = stdoutBuffer.split("\n");
             stdoutBuffer = "";
             for (const line of finalLines) {
+              streamError = parseAntigravityStreamJsonErrorLine(line) ?? streamError;
               const delta = parseAntigravityStreamJsonLine(
                 line.endsWith("\r") ? line.slice(0, -1) : line,
                 session.text,
@@ -272,11 +336,16 @@ export function makeAntigravityAdapter(options: AntigravityAdapterOptions) {
               clearSessionTurn(session, child, turnId);
               return;
             }
-            if (code !== 0 || signal) {
+            if (code !== 0 || signal || streamError) {
+              const stderr = stderrBuffer.trim();
+              const outcome =
+                code !== 0 || signal
+                  ? `Antigravity CLI exited unsuccessfully (${code ?? "signal"}${signal ? `:${signal}` : ""})`
+                  : "Antigravity CLI reported an error";
               finishFailure(
                 session,
                 turnId,
-                `Antigravity CLI exited unsuccessfully (${code ?? "signal"}${signal ? `:${signal}` : ""}).`,
+                `${outcome}${streamError ? `: ${streamError}` : ""}${stderr ? `; stderr: ${stderr}` : ""}${stderrTruncated ? " [stderr truncated]" : ""}.`,
               );
               clearSessionTurn(session, child, turnId);
               return;

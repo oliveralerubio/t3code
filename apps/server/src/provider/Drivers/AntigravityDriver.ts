@@ -8,6 +8,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Schema from "effect/Schema";
+import { ChildProcessSpawner } from "effect/unstable/process";
 import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
@@ -27,6 +28,7 @@ import {
 } from "../ProviderDriver.ts";
 import * as TextGeneration from "../../textGeneration/TextGeneration.ts";
 import { ProviderDriverError } from "../Errors.ts";
+import { ANTIGRAVITY_FALLBACK_MODELS, discoverAntigravityModels } from "../antigravityRuntime.ts";
 
 const DRIVER_KIND = ProviderDriverKind.make("antigravity");
 const decodeSettings = Schema.decodeSync(AntigravitySettings);
@@ -47,24 +49,35 @@ const stamp =
     continuation: { groupKey: input.continuationKey },
   });
 
-const providerSnapshot = (settings: AntigravitySettings): Effect.Effect<ServerProviderDraft> =>
-  Effect.map(DateTime.now, DateTime.formatIso).pipe(
-    Effect.map((checkedAt) =>
-      buildServerProvider({
-        presentation: { displayName: "Antigravity", showInteractionModeToggle: false },
-        enabled: settings.enabled,
-        checkedAt,
-        models: [],
-        probe: {
-          installed: true,
-          version: null,
-          status: "ready",
-          auth: { status: "unknown" },
-          message: "Antigravity CLI is configured; authentication is checked when a turn starts.",
-        },
-      }),
-    ),
-  );
+const providerSnapshot = (
+  settings: AntigravitySettings,
+  environment: NodeJS.ProcessEnv,
+): Effect.Effect<ServerProviderDraft, never, ChildProcessSpawner.ChildProcessSpawner> =>
+  Effect.gen(function* () {
+    const checkedAt = yield* Effect.map(DateTime.now, DateTime.formatIso);
+    const discovery = settings.enabled
+      ? yield* discoverAntigravityModels(settings.binaryPath, environment)
+      : { models: ANTIGRAVITY_FALLBACK_MODELS, installed: false };
+    return buildServerProvider({
+      presentation: { displayName: "Antigravity", showInteractionModeToggle: false },
+      enabled: settings.enabled,
+      checkedAt,
+      models: discovery.models,
+      probe: {
+        installed: discovery.installed,
+        version: null,
+        status: !settings.enabled
+          ? "warning"
+          : discovery.installed && !discovery.message
+            ? "ready"
+            : "error",
+        auth: { status: "unknown" },
+        message:
+          discovery.message ??
+          "Antigravity CLI is configured; authentication is checked when a turn starts.",
+      },
+    });
+  });
 
 const unsupportedTextGeneration = <A>(operation: string): Effect.Effect<A, TextGenerationError> =>
   Effect.fail(
@@ -82,6 +95,7 @@ const textGeneration = (): TextGeneration.TextGeneration["Service"] => ({
 
 export type AntigravityDriverEnv =
   | BackgroundPolicy.BackgroundPolicy
+  | ChildProcessSpawner.ChildProcessSpawner
   | FileSystem.FileSystem
   | ServerConfig
   | ServerSettingsService;
@@ -93,6 +107,7 @@ export const AntigravityDriver: ProviderDriver<AntigravitySettings, AntigravityD
   defaultConfig: () => decodeSettings({}),
   create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
     Effect.gen(function* () {
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const serverSettings = yield* ServerSettingsService;
       const identity = defaultProviderContinuationIdentity({ driverKind: DRIVER_KIND, instanceId });
       const effective = { ...config, enabled } satisfies AntigravitySettings;
@@ -113,7 +128,11 @@ export const AntigravityDriver: ProviderDriver<AntigravitySettings, AntigravityD
         streamSettings: settings.streamSettings,
         haveSettingsChanged: haveProviderSnapshotSettingsChanged,
         initialSnapshot: (next) =>
-          providerSnapshot(next.provider).pipe(
+          providerSnapshot(
+            next.provider,
+            Object.fromEntries(environment.map(({ name, value }) => [name, value])),
+          ).pipe(
+            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
             Effect.map(
               stamp({
                 instanceId,
@@ -123,7 +142,11 @@ export const AntigravityDriver: ProviderDriver<AntigravitySettings, AntigravityD
               }),
             ),
           ),
-        checkProvider: providerSnapshot(effective).pipe(
+        checkProvider: providerSnapshot(
+          effective,
+          Object.fromEntries(environment.map(({ name, value }) => [name, value])),
+        ).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
           Effect.map(
             stamp({
               instanceId,

@@ -1,9 +1,53 @@
+diff --git a/README.md b/README.md
+index c2349e72860a3ec642933810820e66de55d6fb2d..24d053a45ba68e031c70c17d60cfd97087fba813 100644
+--- a/README.md
++++ b/README.md
+@@ -4,6 +4,17 @@ T3 Code is an "agent harness control surface". It enables control of the agents
+ 
+ Works with your subscriptions on Claude Code, Codex, Cursor, Grok Build, and OpenCode. If they're set up on your computer, T3 Code can control them.
+ 
++## What this fork adds
++
++This repository is a downstream fork of [T3 Code upstream](https://github.com/pingdotgg/t3code). It keeps the upstream product as its base and maintains a small, explicit layer for integrations and release behavior that are specific to this fork.
++
++- **Pi provider:** native Pi RPC integration with model discovery, model and thinking-level selection, streamed assistant/thinking events, attachments, and independent provider instances. Startup RPC calls such as `set_model` use an initialization timeout separate from normal prompt requests.
++- **Antigravity provider:** an `agy-direct`/Antigravity CLI adapter that consumes `stream-json` output and maps streamed text, completion, interruption, and process errors into T3 Code runtime events. Each configured instance keeps its own process and session state.
++- **Prime Agent provider:** a separate Prime Agent driver built on the shared Pi-style RPC transport.
++- **Downstream AppImage releases:** this fork builds from a pinned upstream release and applies the patch recorded in [`downstream/overlay.json`](./downstream/overlay.json). The release workflow verifies the upstream repository, tag, commit, overlay checksum, and generated source match before publishing the AppImage to [this fork's releases](https://github.com/oliveralerubio/t3code/releases).
++
++This is a downstream overlay, not a manual copy of T3 Code. Upstream owns the base source; this fork maintains only its delta and rebuilds the distributable image when the upstream pin moves. See [`docs/downstream-releases.md`](./docs/downstream-releases.md) for the maintenance model.
++
+ ## "Wait, what are you selling me?"
+ 
+ Nothing. We built T3 Code because we wanted the best possible development experience with agents. We were inspired by existing solutions like the Codex desktop app, Conductor, Claude Desktop and Cursor Glass, but none met our bar.
+@@ -13,7 +24,7 @@ We wanted something performant, remote-ready, and truly open. If we ever go the
+ ## Installation
+ 
+ > [!WARNING]
+-> T3 Code currently supports Codex, Claude, Cursor, Grok Build and OpenCode. Install and authenticate at least one provider before use:
++> This fork supports the upstream Codex, Claude, Cursor, Grok Build and OpenCode integrations, plus Pi, Antigravity and Prime Agent. Install and authenticate at least one provider before use:
+ >
+ > - Codex: install [Codex CLI](https://developers.openai.com/codex/cli) and run `codex login`
+ > - Claude: install [Claude Code](https://claude.com/product/claude-code) and run `claude auth login`
+@@ -33,9 +44,11 @@ This will launch T3 Code's backend on your machine as well as the local web app
+ 
+ Tip: Use `npx t3@latest --help` for the full CLI reference.
+ 
++The `npx` command and package-registry commands in this section are the upstream T3 Code distribution. To use the fork-specific Pi, Antigravity, and Prime Agent integrations, install the fork's desktop AppImage from its releases below.
++
+ ### Desktop app
+ 
+-Install the latest version of the desktop app from [GitHub Releases](https://github.com/pingdotgg/t3code/releases), or from your favorite package registry:
++Install the latest version of this fork's desktop app from [its GitHub Releases](https://github.com/oliveralerubio/t3code/releases). The original upstream T3 Code releases are published separately at [pingdotgg/t3code](https://github.com/pingdotgg/t3code/releases).
+ 
+ #### Windows (`winget`)
+ 
 diff --git a/apps/server/src/provider/Drivers/AntigravityDriver.ts b/apps/server/src/provider/Drivers/AntigravityDriver.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..06f2218dba63eaa0c536d42db5176c6b7130d0aa
+index 0000000000000000000000000000000000000000..102e7ff449ccf9a44591923fbb0e80e30c36e62f
 --- /dev/null
 +++ b/apps/server/src/provider/Drivers/AntigravityDriver.ts
-@@ -0,0 +1,159 @@
+@@ -0,0 +1,182 @@
 +import {
 +  AntigravitySettings,
 +  ProviderDriverKind,
@@ -14,6 +58,7 @@ index 0000000000000000000000000000000000000000..06f2218dba63eaa0c536d42db5176c6b
 +import * as Effect from "effect/Effect";
 +import * as FileSystem from "effect/FileSystem";
 +import * as Schema from "effect/Schema";
++import { ChildProcessSpawner } from "effect/unstable/process";
 +import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
 +import { ServerConfig } from "../../config.ts";
 +import { ServerSettingsService } from "../../serverSettings.ts";
@@ -33,6 +78,7 @@ index 0000000000000000000000000000000000000000..06f2218dba63eaa0c536d42db5176c6b
 +} from "../ProviderDriver.ts";
 +import * as TextGeneration from "../../textGeneration/TextGeneration.ts";
 +import { ProviderDriverError } from "../Errors.ts";
++import { ANTIGRAVITY_FALLBACK_MODELS, discoverAntigravityModels } from "../antigravityRuntime.ts";
 +
 +const DRIVER_KIND = ProviderDriverKind.make("antigravity");
 +const decodeSettings = Schema.decodeSync(AntigravitySettings);
@@ -53,24 +99,35 @@ index 0000000000000000000000000000000000000000..06f2218dba63eaa0c536d42db5176c6b
 +    continuation: { groupKey: input.continuationKey },
 +  });
 +
-+const providerSnapshot = (settings: AntigravitySettings): Effect.Effect<ServerProviderDraft> =>
-+  Effect.map(DateTime.now, DateTime.formatIso).pipe(
-+    Effect.map((checkedAt) =>
-+      buildServerProvider({
-+        presentation: { displayName: "Antigravity", showInteractionModeToggle: false },
-+        enabled: settings.enabled,
-+        checkedAt,
-+        models: [],
-+        probe: {
-+          installed: true,
-+          version: null,
-+          status: "ready",
-+          auth: { status: "unknown" },
-+          message: "Antigravity CLI is configured; authentication is checked when a turn starts.",
-+        },
-+      }),
-+    ),
-+  );
++const providerSnapshot = (
++  settings: AntigravitySettings,
++  environment: NodeJS.ProcessEnv,
++): Effect.Effect<ServerProviderDraft, never, ChildProcessSpawner.ChildProcessSpawner> =>
++  Effect.gen(function* () {
++    const checkedAt = yield* Effect.map(DateTime.now, DateTime.formatIso);
++    const discovery = settings.enabled
++      ? yield* discoverAntigravityModels(settings.binaryPath, environment)
++      : { models: ANTIGRAVITY_FALLBACK_MODELS, installed: false };
++    return buildServerProvider({
++      presentation: { displayName: "Antigravity", showInteractionModeToggle: false },
++      enabled: settings.enabled,
++      checkedAt,
++      models: discovery.models,
++      probe: {
++        installed: discovery.installed,
++        version: null,
++        status: !settings.enabled
++          ? "warning"
++          : discovery.installed && !discovery.message
++            ? "ready"
++            : "error",
++        auth: { status: "unknown" },
++        message:
++          discovery.message ??
++          "Antigravity CLI is configured; authentication is checked when a turn starts.",
++      },
++    });
++  });
 +
 +const unsupportedTextGeneration = <A>(operation: string): Effect.Effect<A, TextGenerationError> =>
 +  Effect.fail(
@@ -88,6 +145,7 @@ index 0000000000000000000000000000000000000000..06f2218dba63eaa0c536d42db5176c6b
 +
 +export type AntigravityDriverEnv =
 +  | BackgroundPolicy.BackgroundPolicy
++  | ChildProcessSpawner.ChildProcessSpawner
 +  | FileSystem.FileSystem
 +  | ServerConfig
 +  | ServerSettingsService;
@@ -99,6 +157,7 @@ index 0000000000000000000000000000000000000000..06f2218dba63eaa0c536d42db5176c6b
 +  defaultConfig: () => decodeSettings({}),
 +  create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
 +    Effect.gen(function* () {
++      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
 +      const serverSettings = yield* ServerSettingsService;
 +      const identity = defaultProviderContinuationIdentity({ driverKind: DRIVER_KIND, instanceId });
 +      const effective = { ...config, enabled } satisfies AntigravitySettings;
@@ -119,7 +178,11 @@ index 0000000000000000000000000000000000000000..06f2218dba63eaa0c536d42db5176c6b
 +        streamSettings: settings.streamSettings,
 +        haveSettingsChanged: haveProviderSnapshotSettingsChanged,
 +        initialSnapshot: (next) =>
-+          providerSnapshot(next.provider).pipe(
++          providerSnapshot(
++            next.provider,
++            Object.fromEntries(environment.map(({ name, value }) => [name, value])),
++          ).pipe(
++            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
 +            Effect.map(
 +              stamp({
 +                instanceId,
@@ -129,7 +192,11 @@ index 0000000000000000000000000000000000000000..06f2218dba63eaa0c536d42db5176c6b
 +              }),
 +            ),
 +          ),
-+        checkProvider: providerSnapshot(effective).pipe(
++        checkProvider: providerSnapshot(
++          effective,
++          Object.fromEntries(environment.map(({ name, value }) => [name, value])),
++        ).pipe(
++          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
 +          Effect.map(
 +            stamp({
 +              instanceId,
@@ -589,10 +656,10 @@ index 0000000000000000000000000000000000000000..047efc156fec7541caccd046620058c3
 +};
 diff --git a/apps/server/src/provider/Layers/AntigravityAdapter.test.ts b/apps/server/src/provider/Layers/AntigravityAdapter.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..76e9d1828dd7fb7d7a87564b53ab5e3045dfded7
+index 0000000000000000000000000000000000000000..d428c15c979aed9ce19bddbb47e8d6d7771a968a
 --- /dev/null
 +++ b/apps/server/src/provider/Layers/AntigravityAdapter.test.ts
-@@ -0,0 +1,105 @@
+@@ -0,0 +1,220 @@
 +// @effect-diagnostics nodeBuiltinImport:off
 +import { PassThrough } from "node:stream";
 +import type * as NodeChildProcess from "node:child_process";
@@ -600,7 +667,11 @@ index 0000000000000000000000000000000000000000..76e9d1828dd7fb7d7a87564b53ab5e30
 +import * as Stream from "effect/Stream";
 +import { ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 +import { describe, expect, it, vi } from "vite-plus/test";
-+import { makeAntigravityAdapter, parseAntigravityStreamJsonLine } from "./AntigravityAdapter.ts";
++import {
++  makeAntigravityAdapter,
++  parseAntigravityStreamJsonErrorLine,
++  parseAntigravityStreamJsonLine,
++} from "./AntigravityAdapter.ts";
 +
 +const { spawn } = vi.hoisted(() => ({ spawn: vi.fn() }));
 +vi.mock("node:child_process", () => ({ spawn }));
@@ -660,6 +731,19 @@ index 0000000000000000000000000000000000000000..76e9d1828dd7fb7d7a87564b53ab5e30
 +      ),
 +    ).toBe(" mundo");
 +  });
++
++  it("recognizes the CLI result error envelope", () => {
++    expect(
++      parseAntigravityStreamJsonErrorLine(
++        '{"event":"result","result":{"status":"ERROR","error":"timeout waiting for response"}}',
++      ),
++    ).toBe("timeout waiting for response");
++    expect(
++      parseAntigravityStreamJsonLine(
++        '{"event":"result","result":{"status":"ERROR","error":"timeout waiting for response"}}',
++      ),
++    ).toBeUndefined();
++  });
 +});
 +
 +it("keeps an interrupted child owned until close and emits one completion", async () => {
@@ -698,12 +782,110 @@ index 0000000000000000000000000000000000000000..76e9d1828dd7fb7d7a87564b53ab5e30
 +  await Effect.runPromise(adapter.sendTurn({ threadId, input: "after close" }));
 +  expect(spawn).toHaveBeenCalledTimes(2);
 +});
++
++it("propagates bounded stderr when the CLI exits unsuccessfully", async () => {
++  const child = makeChild();
++  spawn.mockReset().mockReturnValue(child);
++
++  const adapter = await Effect.runPromise(
++    makeAntigravityAdapter({
++      instanceId: ProviderInstanceId.make("instance"),
++      binaryPath: "agy-direct",
++    }),
++  );
++  const threadId = ThreadId.make("thread");
++  await Effect.runPromise(adapter.startSession({ threadId, runtimeMode: "full-access" }));
++  const eventsPromise = Effect.runPromise(
++    Stream.take(adapter.streamEvents, 3).pipe(Stream.runCollect),
++  );
++
++  await Effect.runPromise(adapter.sendTurn({ threadId, input: "hello" }));
++  (child.stderr as PassThrough).write("Antigravity could not authenticate\n");
++  child.emit("close", 1, null);
++  const events = await eventsPromise;
++
++  const runtimeError = events.find((event) => event.type === "runtime.error");
++  expect(runtimeError?.type).toBe("runtime.error");
++  if (runtimeError?.type === "runtime.error") {
++    expect(runtimeError.payload.message).toContain("exited unsuccessfully (1)");
++    expect(runtimeError.payload.message).toContain("Antigravity could not authenticate");
++  }
++  const completed = events.find((event) => event.type === "turn.completed");
++  expect(completed?.type).toBe("turn.completed");
++  if (completed?.type === "turn.completed") {
++    expect(completed.payload.errorMessage).toContain("Antigravity could not authenticate");
++  }
++});
++
++it("fails when stream-json reports an error with exit code zero", async () => {
++  const child = makeChild();
++  spawn.mockReset().mockReturnValue(child);
++
++  const adapter = await Effect.runPromise(
++    makeAntigravityAdapter({
++      instanceId: ProviderInstanceId.make("instance"),
++      binaryPath: "agy-direct",
++    }),
++  );
++  const threadId = ThreadId.make("thread");
++  await Effect.runPromise(adapter.startSession({ threadId, runtimeMode: "full-access" }));
++  const eventsPromise = Effect.runPromise(
++    Stream.take(adapter.streamEvents, 3).pipe(Stream.runCollect),
++  );
++
++  await Effect.runPromise(adapter.sendTurn({ threadId, input: "hello" }));
++  (child.stdout as PassThrough).write(
++    '{"event":"result","result":{"status":"ERROR","error":"timeout waiting for response"}}\n',
++  );
++  child.emit("close", 0, null);
++  const events = await eventsPromise;
++
++  const runtimeError = events.find((event) => event.type === "runtime.error");
++  expect(runtimeError?.type).toBe("runtime.error");
++  if (runtimeError?.type === "runtime.error")
++    expect(runtimeError.payload.message).toContain("timeout waiting for response");
++  const completed = events.find((event) => event.type === "turn.completed");
++  expect(completed?.type).toBe("turn.completed");
++  if (completed?.type === "turn.completed") {
++    expect(completed.payload.state).toBe("failed");
++    expect(completed.payload.errorMessage).toContain("timeout waiting for response");
++  }
++});
++
++it("caps stderr included in CLI failure diagnostics", async () => {
++  const child = makeChild();
++  spawn.mockReset().mockReturnValue(child);
++
++  const adapter = await Effect.runPromise(
++    makeAntigravityAdapter({
++      instanceId: ProviderInstanceId.make("instance"),
++      binaryPath: "agy-direct",
++    }),
++  );
++  const threadId = ThreadId.make("thread");
++  await Effect.runPromise(adapter.startSession({ threadId, runtimeMode: "full-access" }));
++  const eventsPromise = Effect.runPromise(
++    Stream.take(adapter.streamEvents, 3).pipe(Stream.runCollect),
++  );
++
++  await Effect.runPromise(adapter.sendTurn({ threadId, input: "hello" }));
++  (child.stderr as PassThrough).write("x".repeat(32 * 1024));
++  child.emit("close", 1, null);
++  const events = await eventsPromise;
++  const runtimeError = events.find((event) => event.type === "runtime.error");
++
++  expect(runtimeError?.type).toBe("runtime.error");
++  if (runtimeError?.type === "runtime.error") {
++    expect(runtimeError.payload.message).toContain("[stderr truncated]");
++    expect(runtimeError.payload.message.length).toBeLessThan(17 * 1024);
++  }
++});
 diff --git a/apps/server/src/provider/Layers/AntigravityAdapter.ts b/apps/server/src/provider/Layers/AntigravityAdapter.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..804816d9702b61cbe761b3e2e9b34db53d525750
+index 0000000000000000000000000000000000000000..3b746ae070aae9f3506280e46798ca8b9a35b19d
 --- /dev/null
 +++ b/apps/server/src/provider/Layers/AntigravityAdapter.ts
-@@ -0,0 +1,425 @@
+@@ -0,0 +1,494 @@
 +// @effect-diagnostics nodeBuiltinImport:off cryptoRandomUUID:off cryptoRandomUUIDInEffect:off globalDate:off runEffectInsideEffect:off
 +import * as NodeChildProcess from "node:child_process";
 +import * as NodeStringDecoder from "node:string_decoder";
@@ -738,6 +920,7 @@ index 0000000000000000000000000000000000000000..804816d9702b61cbe761b3e2e9b34db5
 +
 +const PROVIDER = ProviderDriverKind.make("antigravity");
 +const ASSISTANT_ITEM = `${PROVIDER}-assistant`;
++const MAX_STDERR_BYTES = 16 * 1024;
 +
 +export function parseAntigravityStreamJsonLine(
 +  line: string,
@@ -747,7 +930,12 @@ index 0000000000000000000000000000000000000000..804816d9702b61cbe761b3e2e9b34db5
 +    const value: unknown = JSON.parse(line);
 +    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
 +    const record = value as Record<string, unknown>;
-+    const recordType = typeof record.type === "string" ? record.type : undefined;
++    const recordType =
++      typeof record.type === "string"
++        ? record.type
++        : typeof record.event === "string"
++          ? record.event
++          : undefined;
 +    if (recordType === "step_update" && record.step_type === "agent_response") {
 +      for (const key of ["text_delta", "delta", "text", "response"]) {
 +        const text = record[key];
@@ -755,6 +943,18 @@ index 0000000000000000000000000000000000000000..804816d9702b61cbe761b3e2e9b34db5
 +      }
 +    }
 +    if (recordType === "result") {
++      const nestedResult = record.result;
++      if (nestedResult && typeof nestedResult === "object" && !Array.isArray(nestedResult)) {
++        const nested = nestedResult as Record<string, unknown>;
++        for (const key of ["response", "text", "result"]) {
++          const response = nested[key];
++          if (typeof response === "string" && response) {
++            return response.startsWith(previousText)
++              ? response.slice(previousText.length) || undefined
++              : response;
++          }
++        }
++      }
 +      for (const key of ["response", "text", "result"]) {
 +        const response = record[key];
 +        if (typeof response === "string" && response) {
@@ -799,6 +999,34 @@ index 0000000000000000000000000000000000000000..804816d9702b61cbe761b3e2e9b34db5
 +    return snapshot && snapshot.startsWith(previousText)
 +      ? snapshot.slice(previousText.length) || undefined
 +      : snapshot || undefined;
++  } catch {
++    return undefined;
++  }
++}
++
++export function parseAntigravityStreamJsonErrorLine(line: string): string | undefined {
++  try {
++    const value: unknown = JSON.parse(line);
++    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
++    const record = value as Record<string, unknown>;
++    const recordType =
++      typeof record.type === "string"
++        ? record.type
++        : typeof record.event === "string"
++          ? record.event
++          : undefined;
++    if (recordType !== "result") return undefined;
++    const result =
++      record.result && typeof record.result === "object" && !Array.isArray(record.result)
++        ? (record.result as Record<string, unknown>)
++        : record;
++    const status = typeof result.status === "string" ? result.status.toLowerCase() : undefined;
++    if (status !== "error" && status !== "failed") return undefined;
++    for (const key of ["error", "message", "detail"]) {
++      const detail = result[key];
++      if (typeof detail === "string" && detail.trim()) return detail.trim();
++    }
++    return `status=${status}`;
 +  } catch {
 +    return undefined;
 +  }
@@ -936,12 +1164,18 @@ index 0000000000000000000000000000000000000000..804816d9702b61cbe761b3e2e9b34db5
 +          });
 +          session.child = child;
 +          const decoder = new NodeStringDecoder.StringDecoder("utf8");
++          const stderrDecoder = new NodeStringDecoder.StringDecoder("utf8");
 +          let stdoutBuffer = "";
++          let streamError: string | undefined;
++          let stderrBuffer = "";
++          let stderrBytes = 0;
++          let stderrTruncated = false;
 +          const consume = (chunk: Buffer, flush = false) => {
 +            stdoutBuffer += decoder.write(chunk);
 +            const lines = stdoutBuffer.split("\n");
 +            stdoutBuffer = flush ? "" : (lines.pop() ?? "");
 +            for (const line of lines) {
++              streamError = parseAntigravityStreamJsonErrorLine(line) ?? streamError;
 +              const delta = parseAntigravityStreamJsonLine(
 +                line.endsWith("\r") ? line.slice(0, -1) : line,
 +                session.text,
@@ -952,15 +1186,27 @@ index 0000000000000000000000000000000000000000..804816d9702b61cbe761b3e2e9b34db5
 +          child.stdout.on("data", (chunk: Buffer) => {
 +            consume(chunk);
 +          });
-+          child.stderr.on("data", () => undefined);
++          child.stderr.on("data", (chunk: Buffer) => {
++            if (stderrBytes >= MAX_STDERR_BYTES) {
++              stderrTruncated = true;
++              return;
++            }
++            const remaining = MAX_STDERR_BYTES - stderrBytes;
++            const accepted = chunk.byteLength > remaining ? chunk.subarray(0, remaining) : chunk;
++            stderrBytes += accepted.byteLength;
++            stderrBuffer += stderrDecoder.write(accepted);
++            if (accepted.byteLength < chunk.byteLength) stderrTruncated = true;
++          });
 +          child.once("error", (cause) =>
 +            finishFailure(session, turnId, cause instanceof Error ? cause.message : String(cause)),
 +          );
 +          child.once("close", (code, signal) => {
++            stderrBuffer += stderrDecoder.end();
 +            stdoutBuffer += decoder.end();
 +            const finalLines = stdoutBuffer.split("\n");
 +            stdoutBuffer = "";
 +            for (const line of finalLines) {
++              streamError = parseAntigravityStreamJsonErrorLine(line) ?? streamError;
 +              const delta = parseAntigravityStreamJsonLine(
 +                line.endsWith("\r") ? line.slice(0, -1) : line,
 +                session.text,
@@ -978,11 +1224,16 @@ index 0000000000000000000000000000000000000000..804816d9702b61cbe761b3e2e9b34db5
 +              clearSessionTurn(session, child, turnId);
 +              return;
 +            }
-+            if (code !== 0 || signal) {
++            if (code !== 0 || signal || streamError) {
++              const stderr = stderrBuffer.trim();
++              const outcome =
++                code !== 0 || signal
++                  ? `Antigravity CLI exited unsuccessfully (${code ?? "signal"}${signal ? `:${signal}` : ""})`
++                  : "Antigravity CLI reported an error";
 +              finishFailure(
 +                session,
 +                turnId,
-+                `Antigravity CLI exited unsuccessfully (${code ?? "signal"}${signal ? `:${signal}` : ""}).`,
++                `${outcome}${streamError ? `: ${streamError}` : ""}${stderr ? `; stderr: ${stderr}` : ""}${stderrTruncated ? " [stderr truncated]" : ""}.`,
 +              );
 +              clearSessionTurn(session, child, turnId);
 +              return;
@@ -1410,6 +1661,284 @@ index 0000000000000000000000000000000000000000..5f93de732cdcbf8b1d68a3da18430211
 +
 +export const makePiAdapter = (options: PiAdapterOptions) =>
 +  makeAgentAdapter({ ...options, provider: ProviderDriverKind.make("pi"), providerName: "Pi" });
+diff --git a/apps/server/src/provider/antigravityRuntime.test.ts b/apps/server/src/provider/antigravityRuntime.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..cccc342aee428eb3e6ff568fd66417e59a325373
+--- /dev/null
++++ b/apps/server/src/provider/antigravityRuntime.test.ts
+@@ -0,0 +1,151 @@
++import * as Effect from "effect/Effect";
++import * as Sink from "effect/Sink";
++import * as Stream from "effect/Stream";
++import { ChildProcessSpawner } from "effect/unstable/process";
++import { describe, expect, it } from "vite-plus/test";
++
++import {
++  ANTIGRAVITY_FALLBACK_MODELS,
++  discoverAntigravityModels,
++  markAntigravityDefaultModel,
++  parseAntigravityModels,
++} from "./antigravityRuntime.ts";
++
++const makeSpawner = (
++  stdout: string,
++  code = 0,
++  seenCommand?: { command?: unknown },
++): ChildProcessSpawner.ChildProcessSpawner["Service"] =>
++  ChildProcessSpawner.make(
++    (command) => (
++      seenCommand ? (seenCommand.command = command) : undefined,
++      Effect.succeed(
++        ChildProcessSpawner.makeHandle({
++          pid: ChildProcessSpawner.ProcessId(1),
++          exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(code)),
++          isRunning: Effect.succeed(false),
++          kill: () => Effect.void,
++          unref: Effect.succeed(Effect.void),
++          stdin: Sink.drain,
++          stdout: Stream.encodeText(Stream.make(stdout)),
++          stderr: Stream.empty,
++          all: Stream.empty,
++          getInputFd: () => Sink.drain,
++          getOutputFd: () => Stream.empty,
++        }),
++      )
++    ),
++  );
++
++describe("Antigravity model discovery", () => {
++  it("parses tab-separated model slugs and display names", () => {
++    expect(
++      parseAntigravityModels(
++        "gemini-3.7-flash-high\tGemini 3.7 Flash High\n" +
++          "gemini-3.7-flash-medium\tGemini 3.7 Flash Medium\n",
++      ),
++    ).toEqual([
++      {
++        slug: "gemini-3.7-flash-high",
++        name: "Gemini 3.7 Flash High",
++        isCustom: false,
++        capabilities: { optionDescriptors: [] },
++      },
++      {
++        slug: "gemini-3.7-flash-medium",
++        name: "Gemini 3.7 Flash Medium",
++        isCustom: false,
++        capabilities: { optionDescriptors: [] },
++      },
++    ]);
++  });
++
++  it("ignores malformed rows and keeps the first duplicate", () => {
++    expect(
++      parseAntigravityModels(
++        "not-a-model\n" +
++          "gemini-3.7-flash-high\t High \n" +
++          "gemini-3.7-flash-high\tLater\n" +
++          "\tMissing slug\n" +
++          "gemini-3.7-flash-low\t\n",
++      ),
++    ).toEqual([
++      {
++        slug: "gemini-3.7-flash-high",
++        name: "High",
++        isCustom: false,
++        capabilities: { optionDescriptors: [] },
++      },
++    ]);
++  });
++
++  it("provides the observed Gemini 3.7 catalog as the offline fallback", () => {
++    expect(ANTIGRAVITY_FALLBACK_MODELS.map(({ slug }) => slug)).toEqual([
++      "gemini-3.7-flash-high",
++      "gemini-3.7-flash-medium",
++      "gemini-3.7-flash-low",
++    ]);
++    expect(ANTIGRAVITY_FALLBACK_MODELS.every((model) => model.capabilities)).toBe(true);
++    expect(ANTIGRAVITY_FALLBACK_MODELS.find((model) => model.isDefault)?.slug).toBe(
++      "gemini-3.7-flash-high",
++    );
++  });
++
++  it("selects an available model when the preferred high profile is absent", () => {
++    expect(
++      markAntigravityDefaultModel([
++        {
++          slug: "gemini-3.7-flash-medium",
++          name: "Gemini 3.7 Flash Medium",
++          isCustom: false,
++          capabilities: { optionDescriptors: [] },
++        },
++      ]),
++    ).toEqual([
++      {
++        slug: "gemini-3.7-flash-medium",
++        name: "Gemini 3.7 Flash Medium",
++        isCustom: false,
++        isDefault: true,
++        capabilities: { optionDescriptors: [] },
++      },
++    ]);
++  });
++
++  it("invokes the configured binary with models", async () => {
++    await Effect.runPromise(
++      Effect.gen(function* () {
++        const seenCommand: { command?: unknown } = {};
++        const discovery = yield* discoverAntigravityModels("/tmp/configured-agy", {
++          AGY_TEST: "yes",
++        }).pipe(
++          Effect.provideService(
++            ChildProcessSpawner.ChildProcessSpawner,
++            makeSpawner("gemini-3.7-flash-high\tHigh\n", 0, seenCommand),
++          ),
++        );
++        expect(seenCommand.command).toMatchObject({
++          command: "/tmp/configured-agy",
++          args: ["models"],
++        });
++        expect(discovery.installed).toBe(true);
++        expect(discovery.models[0]?.slug).toBe("gemini-3.7-flash-high");
++      }),
++    );
++  });
++
++  it("falls back when the models command exits unsuccessfully", async () => {
++    await Effect.runPromise(
++      discoverAntigravityModels("agy-direct").pipe(
++        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, makeSpawner("", 1)),
++        Effect.tap((discovery) =>
++          Effect.sync(() => {
++            expect(discovery.installed).toBe(true);
++            expect(discovery.models).toEqual(ANTIGRAVITY_FALLBACK_MODELS);
++            expect(discovery.message).toContain("exited with code 1");
++          }),
++        ),
++      ),
++    );
++  });
++});
+diff --git a/apps/server/src/provider/antigravityRuntime.ts b/apps/server/src/provider/antigravityRuntime.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..3b8e6c6bc34d7f3c880a931bab7b4de287a8270d
+--- /dev/null
++++ b/apps/server/src/provider/antigravityRuntime.ts
+@@ -0,0 +1,115 @@
++import type { ModelCapabilities, ServerProviderModel } from "@t3tools/contracts";
++import * as Duration from "effect/Duration";
++import * as Effect from "effect/Effect";
++import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
++import { createModelCapabilities } from "@t3tools/shared/model";
++import { resolveSpawnCommand } from "@t3tools/shared/shell";
++import { spawnAndCollect } from "./providerSnapshot.ts";
++
++const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({ optionDescriptors: [] });
++const ANTIGRAVITY_MODELS_TIMEOUT = Duration.seconds(4);
++
++const ANTIGRAVITY_FALLBACK_CATALOG: ReadonlyArray<ServerProviderModel> = [
++  {
++    slug: "gemini-3.7-flash-high",
++    name: "Gemini 3.7 Flash High",
++    isCustom: false,
++    capabilities: EMPTY_CAPABILITIES,
++  },
++  {
++    slug: "gemini-3.7-flash-medium",
++    name: "Gemini 3.7 Flash Medium",
++    isCustom: false,
++    capabilities: EMPTY_CAPABILITIES,
++  },
++  {
++    slug: "gemini-3.7-flash-low",
++    name: "Gemini 3.7 Flash Low",
++    isCustom: false,
++    capabilities: EMPTY_CAPABILITIES,
++  },
++];
++
++export interface AntigravityModelDiscovery {
++  readonly models: ReadonlyArray<ServerProviderModel>;
++  readonly installed: boolean;
++  readonly message?: string;
++}
++
++export function markAntigravityDefaultModel(
++  models: ReadonlyArray<ServerProviderModel>,
++): ReadonlyArray<ServerProviderModel> {
++  const defaultSlug =
++    models.find((model) => model.slug === "gemini-3.7-flash-high")?.slug ??
++    models.find((model) => !model.isCustom)?.slug;
++  return models.map((model) => ({
++    ...model,
++    ...(model.slug === defaultSlug ? { isDefault: true } : {}),
++  }));
++}
++
++export const ANTIGRAVITY_FALLBACK_MODELS = markAntigravityDefaultModel(
++  ANTIGRAVITY_FALLBACK_CATALOG,
++);
++
++export function parseAntigravityModels(output: string): ReadonlyArray<ServerProviderModel> {
++  const seen = new Set<string>();
++  const models: ServerProviderModel[] = [];
++
++  for (const line of output.split(/\r?\n/)) {
++    const [rawSlug, rawName] = line.split("\t", 2);
++    const slug = rawSlug?.trim();
++    const name = rawName?.trim();
++    if (!slug || !name || seen.has(slug)) continue;
++    seen.add(slug);
++    models.push({ slug, name, isCustom: false, capabilities: EMPTY_CAPABILITIES });
++  }
++
++  return models;
++}
++
++export function discoverAntigravityModels(
++  binaryPath: string | undefined,
++  environment: NodeJS.ProcessEnv = process.env,
++): Effect.Effect<AntigravityModelDiscovery, never, ChildProcessSpawner.ChildProcessSpawner> {
++  const command = binaryPath?.trim() || "agy-direct";
++  return Effect.gen(function* () {
++    const effectiveEnvironment = { ...process.env, ...environment };
++    const spawnCommand = yield* resolveSpawnCommand(command, ["models"], {
++      env: effectiveEnvironment,
++    });
++    const result = yield* spawnAndCollect(
++      command,
++      ChildProcess.make(spawnCommand.command, spawnCommand.args, {
++        env: effectiveEnvironment,
++        shell: spawnCommand.shell,
++      }),
++    );
++    const models = result.code === 0 ? parseAntigravityModels(result.stdout) : [];
++    if (result.code !== 0) {
++      return {
++        models: ANTIGRAVITY_FALLBACK_MODELS,
++        installed: true,
++        message: result.stderr.trim() || `${command} models exited with code ${result.code}.`,
++      } satisfies AntigravityModelDiscovery;
++    }
++    if (models.length === 0) {
++      return {
++        models: ANTIGRAVITY_FALLBACK_MODELS,
++        installed: true,
++        message: `${command} models returned no selectable models.`,
++      } satisfies AntigravityModelDiscovery;
++    }
++    return {
++      models: markAntigravityDefaultModel(models),
++      installed: true,
++    } satisfies AntigravityModelDiscovery;
++  }).pipe(
++    Effect.timeout(ANTIGRAVITY_MODELS_TIMEOUT),
++    Effect.orElseSucceed(() => ({
++      models: ANTIGRAVITY_FALLBACK_MODELS,
++      installed: false,
++      message: `${command} models could not be started or timed out.`,
++    })),
++  );
++}
 diff --git a/apps/server/src/provider/builtInDrivers.test.ts b/apps/server/src/provider/builtInDrivers.test.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..353464aaa736ed1067f800266d4a4c56f3f0983f
@@ -4511,8 +5040,26 @@ index a309d70f03ded9aeff28adf4372725cbaa3a51ce..42a8bd8ab192e613074ccc015b517fb1
  [adapter]: ../../apps/server/src/provider/Services/ProviderAdapter.ts
  [instances]: ../../apps/server/src/provider/Services/ProviderInstanceRegistry.ts
  [registry]: ../../apps/server/src/provider/Services/ProviderAdapterRegistry.ts
+diff --git a/packages/contracts/src/model.test.ts b/packages/contracts/src/model.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..14dc383a65531264ef4aa1f125ed065e207d8785
+--- /dev/null
++++ b/packages/contracts/src/model.test.ts
+@@ -0,0 +1,12 @@
++import { describe, expect, it } from "vite-plus/test";
++import { DEFAULT_MODEL_BY_PROVIDER, DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER } from "./model.ts";
++import { ProviderDriverKind } from "./providerInstance.ts";
++
++const ANTIGRAVITY = ProviderDriverKind.make("antigravity");
++
++describe("Antigravity model defaults", () => {
++  it("uses the current high-effort Gemini 3.7 Flash model", () => {
++    expect(DEFAULT_MODEL_BY_PROVIDER[ANTIGRAVITY]).toBe("gemini-3.7-flash-high");
++    expect(DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER[ANTIGRAVITY]).toBe("gemini-3.7-flash-high");
++  });
++});
 diff --git a/packages/contracts/src/model.ts b/packages/contracts/src/model.ts
-index 9fcd0d266dd627a22253660450090457edf57efb..80f14aafc808ad6fcee2edacba978631769025ee 100644
+index 9fcd0d266dd627a22253660450090457edf57efb..b2ed25d12f655981c0a498101f73f8a440dc5ffa 100644
 --- a/packages/contracts/src/model.ts
 +++ b/packages/contracts/src/model.ts
 @@ -4,6 +4,24 @@ import * as SchemaTransformation from "effect/SchemaTransformation";
@@ -4556,7 +5103,7 @@ index 9fcd0d266dd627a22253660450090457edf57efb..80f14aafc808ad6fcee2edacba978631
    [OPENCODE_DRIVER_KIND]: "openai/gpt-5",
 +  [PI_DRIVER_KIND]: undefined,
 +  [PRIME_AGENT_DRIVER_KIND]: undefined,
-+  [ANTIGRAVITY_DRIVER_KIND]: "gemini-3.6-flash-high",
++  [ANTIGRAVITY_DRIVER_KIND]: "gemini-3.7-flash-high",
  };
  
  /** Per-provider text generation model defaults. */
@@ -4566,7 +5113,7 @@ index 9fcd0d266dd627a22253660450090457edf57efb..80f14aafc808ad6fcee2edacba978631
    [OPENCODE_DRIVER_KIND]: "openai/gpt-5",
 +  [PI_DRIVER_KIND]: undefined,
 +  [PRIME_AGENT_DRIVER_KIND]: undefined,
-+  [ANTIGRAVITY_DRIVER_KIND]: "gemini-3.6-flash-high",
++  [ANTIGRAVITY_DRIVER_KIND]: "gemini-3.7-flash-high",
  };
  
  export const MODEL_SLUG_ALIASES_BY_PROVIDER: Partial<

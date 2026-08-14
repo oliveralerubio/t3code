@@ -5,7 +5,11 @@ import * as Effect from "effect/Effect";
 import * as Stream from "effect/Stream";
 import { ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
-import { makeAntigravityAdapter, parseAntigravityStreamJsonLine } from "./AntigravityAdapter.ts";
+import {
+  makeAntigravityAdapter,
+  parseAntigravityStreamJsonErrorLine,
+  parseAntigravityStreamJsonLine,
+} from "./AntigravityAdapter.ts";
 
 const { spawn } = vi.hoisted(() => ({ spawn: vi.fn() }));
 vi.mock("node:child_process", () => ({ spawn }));
@@ -65,6 +69,19 @@ describe("Antigravity stream-json", () => {
       ),
     ).toBe(" mundo");
   });
+
+  it("recognizes the CLI result error envelope", () => {
+    expect(
+      parseAntigravityStreamJsonErrorLine(
+        '{"event":"result","result":{"status":"ERROR","error":"timeout waiting for response"}}',
+      ),
+    ).toBe("timeout waiting for response");
+    expect(
+      parseAntigravityStreamJsonLine(
+        '{"event":"result","result":{"status":"ERROR","error":"timeout waiting for response"}}',
+      ),
+    ).toBeUndefined();
+  });
 });
 
 it("keeps an interrupted child owned until close and emits one completion", async () => {
@@ -102,4 +119,102 @@ it("keeps an interrupted child owned until close and emits one completion", asyn
   firstChild.emit("close", 130, "SIGINT");
   await Effect.runPromise(adapter.sendTurn({ threadId, input: "after close" }));
   expect(spawn).toHaveBeenCalledTimes(2);
+});
+
+it("propagates bounded stderr when the CLI exits unsuccessfully", async () => {
+  const child = makeChild();
+  spawn.mockReset().mockReturnValue(child);
+
+  const adapter = await Effect.runPromise(
+    makeAntigravityAdapter({
+      instanceId: ProviderInstanceId.make("instance"),
+      binaryPath: "agy-direct",
+    }),
+  );
+  const threadId = ThreadId.make("thread");
+  await Effect.runPromise(adapter.startSession({ threadId, runtimeMode: "full-access" }));
+  const eventsPromise = Effect.runPromise(
+    Stream.take(adapter.streamEvents, 3).pipe(Stream.runCollect),
+  );
+
+  await Effect.runPromise(adapter.sendTurn({ threadId, input: "hello" }));
+  (child.stderr as PassThrough).write("Antigravity could not authenticate\n");
+  child.emit("close", 1, null);
+  const events = await eventsPromise;
+
+  const runtimeError = events.find((event) => event.type === "runtime.error");
+  expect(runtimeError?.type).toBe("runtime.error");
+  if (runtimeError?.type === "runtime.error") {
+    expect(runtimeError.payload.message).toContain("exited unsuccessfully (1)");
+    expect(runtimeError.payload.message).toContain("Antigravity could not authenticate");
+  }
+  const completed = events.find((event) => event.type === "turn.completed");
+  expect(completed?.type).toBe("turn.completed");
+  if (completed?.type === "turn.completed") {
+    expect(completed.payload.errorMessage).toContain("Antigravity could not authenticate");
+  }
+});
+
+it("fails when stream-json reports an error with exit code zero", async () => {
+  const child = makeChild();
+  spawn.mockReset().mockReturnValue(child);
+
+  const adapter = await Effect.runPromise(
+    makeAntigravityAdapter({
+      instanceId: ProviderInstanceId.make("instance"),
+      binaryPath: "agy-direct",
+    }),
+  );
+  const threadId = ThreadId.make("thread");
+  await Effect.runPromise(adapter.startSession({ threadId, runtimeMode: "full-access" }));
+  const eventsPromise = Effect.runPromise(
+    Stream.take(adapter.streamEvents, 3).pipe(Stream.runCollect),
+  );
+
+  await Effect.runPromise(adapter.sendTurn({ threadId, input: "hello" }));
+  (child.stdout as PassThrough).write(
+    '{"event":"result","result":{"status":"ERROR","error":"timeout waiting for response"}}\n',
+  );
+  child.emit("close", 0, null);
+  const events = await eventsPromise;
+
+  const runtimeError = events.find((event) => event.type === "runtime.error");
+  expect(runtimeError?.type).toBe("runtime.error");
+  if (runtimeError?.type === "runtime.error")
+    expect(runtimeError.payload.message).toContain("timeout waiting for response");
+  const completed = events.find((event) => event.type === "turn.completed");
+  expect(completed?.type).toBe("turn.completed");
+  if (completed?.type === "turn.completed") {
+    expect(completed.payload.state).toBe("failed");
+    expect(completed.payload.errorMessage).toContain("timeout waiting for response");
+  }
+});
+
+it("caps stderr included in CLI failure diagnostics", async () => {
+  const child = makeChild();
+  spawn.mockReset().mockReturnValue(child);
+
+  const adapter = await Effect.runPromise(
+    makeAntigravityAdapter({
+      instanceId: ProviderInstanceId.make("instance"),
+      binaryPath: "agy-direct",
+    }),
+  );
+  const threadId = ThreadId.make("thread");
+  await Effect.runPromise(adapter.startSession({ threadId, runtimeMode: "full-access" }));
+  const eventsPromise = Effect.runPromise(
+    Stream.take(adapter.streamEvents, 3).pipe(Stream.runCollect),
+  );
+
+  await Effect.runPromise(adapter.sendTurn({ threadId, input: "hello" }));
+  (child.stderr as PassThrough).write("x".repeat(32 * 1024));
+  child.emit("close", 1, null);
+  const events = await eventsPromise;
+  const runtimeError = events.find((event) => event.type === "runtime.error");
+
+  expect(runtimeError?.type).toBe("runtime.error");
+  if (runtimeError?.type === "runtime.error") {
+    expect(runtimeError.payload.message).toContain("[stderr truncated]");
+    expect(runtimeError.payload.message.length).toBeLessThan(17 * 1024);
+  }
 });
