@@ -165,6 +165,22 @@ function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+const PI_NORMAL_REQUEST_TIMEOUT_MS = 15_000;
+const PI_STARTUP_REQUEST_TIMEOUT_MS = 60_000;
+const PI_STARTUP_COMMANDS = new Set([
+  "get_available_models",
+  "get_state",
+  "set_model",
+  "set_thinking_level",
+  "switch_session",
+]);
+
+export function piRpcRequestTimeoutMs(commandType: string | undefined): number {
+  return commandType && PI_STARTUP_COMMANDS.has(commandType)
+    ? PI_STARTUP_REQUEST_TIMEOUT_MS
+    : PI_NORMAL_REQUEST_TIMEOUT_MS;
+}
+
 export function buildPiRpcArgs(input: {
   readonly offline?: boolean;
   readonly agentDir?: string;
@@ -457,7 +473,7 @@ export class PiRpcManager {
   private request(
     session: SessionState,
     command: PiRpcRecord,
-    timeoutMs = 15_000,
+    timeoutMs = piRpcRequestTimeoutMs(stringValue(command.type)),
   ): Promise<PiRpcRecord> {
     if (session.child.stdin.destroyed)
       return Promise.reject(new Error(`${this.providerName()} RPC stdin is closed.`));

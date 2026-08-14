@@ -1,4 +1,4 @@
-import { describe, expect, it } from "@effect/vitest";
+import { describe, expect, it } from "vite-plus/test";
 import { ThreadId } from "@t3tools/contracts";
 import {
   decodePiUtf8Chunks,
@@ -8,9 +8,15 @@ import {
   mapPiAvailableModels,
   PiRpcManager,
   piModelCapabilities,
+  piRpcRequestTimeoutMs,
 } from "./piRpcManager.ts";
 
 describe("PiRpcManager lifecycle", () => {
+  it("allows startup configuration longer than normal prompt requests", () => {
+    expect(piRpcRequestTimeoutMs("prompt")).toBe(15_000);
+    expect(piRpcRequestTimeoutMs("set_model")).toBeGreaterThan(piRpcRequestTimeoutMs("prompt"));
+  });
+
   it("uses offline startup for model discovery without changing interactive sessions", () => {
     expect(buildPiRpcArgs({ offline: true })).toEqual([
       "--offline",

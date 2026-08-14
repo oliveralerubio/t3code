@@ -113,6 +113,7 @@ interface Session {
   turnId: TurnId | undefined;
   text: string;
   stopping: boolean;
+  completionEmitted: boolean;
 }
 
 function base(session: Session, turnId?: TurnId, itemId?: string) {
@@ -169,6 +170,7 @@ export function makeAntigravityAdapter(options: AntigravityAdapterOptions) {
           turnId: undefined,
           text: "",
           stopping: false,
+          completionEmitted: false,
         };
         sessions.set(input.threadId, session);
       }
@@ -206,6 +208,7 @@ export function makeAntigravityAdapter(options: AntigravityAdapterOptions) {
           session.turnId = turnId;
           session.text = "";
           session.stopping = false;
+          session.completionEmitted = false;
           const model = input.modelSelection?.model;
           const args = [
             "--print",
@@ -258,15 +261,26 @@ export function makeAntigravityAdapter(options: AntigravityAdapterOptions) {
               );
               if (delta && isActiveTurn(session, turnId)) emitDelta(session, turnId, delta);
             }
+            if (session.child !== child) return;
+            if (session.completionEmitted) {
+              clearSessionTurn(session, child, turnId);
+              return;
+            }
             if (!isActiveTurn(session, turnId)) return;
-            if (session.stopping)
-              return finishFailure(session, turnId, "Antigravity turn interrupted.", "interrupted");
-            if (code !== 0 || signal)
-              return finishFailure(
+            if (session.stopping) {
+              finishFailure(session, turnId, "Antigravity turn interrupted.", "interrupted");
+              clearSessionTurn(session, child, turnId);
+              return;
+            }
+            if (code !== 0 || signal) {
+              finishFailure(
                 session,
                 turnId,
                 `Antigravity CLI exited unsuccessfully (${code ?? "signal"}${signal ? `:${signal}` : ""}).`,
               );
+              clearSessionTurn(session, child, turnId);
+              return;
+            }
             emit({
               type: "item.completed",
               ...base(session, turnId, assistantItemId(session, turnId)),
@@ -282,7 +296,7 @@ export function makeAntigravityAdapter(options: AntigravityAdapterOptions) {
               ...base(session, turnId),
               payload: { state: "completed", stopReason: "stop" },
             } satisfies ProviderRuntimeTurnCompletedEvent);
-            clearSessionTurn(session);
+            clearSessionTurn(session, child, turnId);
           });
           return { threadId: input.threadId, turnId };
         },
@@ -302,6 +316,8 @@ export function makeAntigravityAdapter(options: AntigravityAdapterOptions) {
       state: "failed" | "interrupted" = "failed",
     ): void => {
       if (!isActiveTurn(session, turnId)) return;
+      if (session.completionEmitted) return;
+      session.completionEmitted = true;
       if (state === "failed")
         emit({
           type: "runtime.error",
@@ -316,12 +332,17 @@ export function makeAntigravityAdapter(options: AntigravityAdapterOptions) {
           ...(state === "interrupted" ? { stopReason: "interrupted" } : { errorMessage: message }),
         },
       } satisfies ProviderRuntimeTurnCompletedEvent);
-      clearSessionTurn(session);
     };
-    const clearSessionTurn = (session: SessionWithInstance): void => {
+    const clearSessionTurn = (
+      session: SessionWithInstance,
+      child: NodeChildProcess.ChildProcessWithoutNullStreams,
+      turnId: TurnId,
+    ): void => {
+      if (session.child !== child) return;
       session.child = undefined;
-      session.turnId = undefined;
+      if (session.turnId === turnId) session.turnId = undefined;
       session.stopping = false;
+      session.completionEmitted = false;
     };
 
     const adapter: ProviderAdapterShape<ProviderAdapterError> = {
@@ -337,7 +358,7 @@ export function makeAntigravityAdapter(options: AntigravityAdapterOptions) {
           const turnId = session.turnId;
           const child = session.child;
           session.stopping = true;
-          session.child = undefined;
+          session.completionEmitted = true;
           session.turnId = undefined;
           child.kill("SIGINT");
           emit({
@@ -368,7 +389,7 @@ export function makeAntigravityAdapter(options: AntigravityAdapterOptions) {
           const child = session?.child;
           if (session && child) {
             session.stopping = true;
-            session.child = undefined;
+            session.completionEmitted = true;
             session.turnId = undefined;
             child.kill("SIGTERM");
           }
@@ -391,7 +412,7 @@ export function makeAntigravityAdapter(options: AntigravityAdapterOptions) {
             if (session.child) {
               const child = session.child;
               session.stopping = true;
-              session.child = undefined;
+              session.completionEmitted = true;
               session.turnId = undefined;
               child.kill("SIGTERM");
             }

@@ -1,5 +1,23 @@
-import { describe, expect, it } from "vite-plus/test";
-import { parseAntigravityStreamJsonLine } from "./AntigravityAdapter.ts";
+// @effect-diagnostics nodeBuiltinImport:off
+import { PassThrough } from "node:stream";
+import type * as NodeChildProcess from "node:child_process";
+import * as Effect from "effect/Effect";
+import * as Stream from "effect/Stream";
+import { ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import { describe, expect, it, vi } from "vite-plus/test";
+import { makeAntigravityAdapter, parseAntigravityStreamJsonLine } from "./AntigravityAdapter.ts";
+
+const { spawn } = vi.hoisted(() => ({ spawn: vi.fn() }));
+vi.mock("node:child_process", () => ({ spawn }));
+
+const makeChild = () => {
+  const child = Object.assign(new PassThrough(), {
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    kill: vi.fn(() => true),
+  });
+  return child as unknown as NodeChildProcess.ChildProcessWithoutNullStreams;
+};
 
 describe("Antigravity stream-json", () => {
   it("extracts assistant text and ignores non-text events", () => {
@@ -47,4 +65,41 @@ describe("Antigravity stream-json", () => {
       ),
     ).toBe(" mundo");
   });
+});
+
+it("keeps an interrupted child owned until close and emits one completion", async () => {
+  const firstChild = makeChild();
+  const secondChild = makeChild();
+  spawn.mockReset().mockReturnValueOnce(firstChild).mockReturnValueOnce(secondChild);
+
+  const adapter = await Effect.runPromise(
+    makeAntigravityAdapter({
+      instanceId: ProviderInstanceId.make("instance"),
+      binaryPath: "agy-direct",
+    }),
+  );
+  const threadId = ThreadId.make("thread");
+  await Effect.runPromise(adapter.startSession({ threadId, runtimeMode: "full-access" }));
+  const eventsPromise = Effect.runPromise(
+    Stream.take(adapter.streamEvents, 2).pipe(Stream.runCollect),
+  );
+
+  await Effect.runPromise(adapter.sendTurn({ threadId, input: "hello" }));
+  await Effect.runPromise(adapter.interruptTurn(threadId));
+  const interruptedEvents = await eventsPromise;
+
+  expect(firstChild.kill).toHaveBeenCalledWith("SIGINT");
+  expect(interruptedEvents.filter((event) => event.type === "turn.completed")).toHaveLength(1);
+  let blockedError: unknown;
+  try {
+    await Effect.runPromise(adapter.sendTurn({ threadId, input: "should wait" }));
+  } catch (error) {
+    blockedError = error;
+  }
+  expect(blockedError).toBeDefined();
+  expect(String(blockedError)).toContain("already streaming a turn");
+
+  firstChild.emit("close", 130, "SIGINT");
+  await Effect.runPromise(adapter.sendTurn({ threadId, input: "after close" }));
+  expect(spawn).toHaveBeenCalledTimes(2);
 });

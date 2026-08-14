@@ -1,19 +1,39 @@
 name: Fork Nightly AppImage
 
 on:
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
+    branches:
+      - main
   workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: Upstream T3 Code release tag that matches downstream/overlay.json
+        required: true
+        default: v0.0.33
+        type: string
 
-# This workflow deliberately publishes only the Linux desktop prerelease for
-# this fork. It does not require the upstream release app, npm, relay, Vercel,
-# Discord, signing, or any repository secret beyond the workflow GITHUB_TOKEN.
+# This workflow publishes only the Linux desktop prerelease for this fork. It
+# builds a disposable upstream release tree and applies the maintained
+# downstream overlay before compiling. It does not publish the fork's full
+# source tree as the build input.
 concurrency:
-  group: fork-nightly-appimage-${{ github.ref }}
+  group: fork-nightly-appimage-${{ github.event.workflow_run.head_sha || github.sha }}
   cancel-in-progress: false
 
 jobs:
   build:
     name: Build and validate Linux x64 nightly
-    if: github.repository == 'oliveralerubio/t3code' && github.ref == 'refs/heads/main'
+    if: >-
+      github.repository == 'oliveralerubio/t3code' &&
+      ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.head_branch == 'main'))
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
@@ -22,24 +42,104 @@ jobs:
       version: ${{ steps.release_meta.outputs.version }}
       tag: ${{ steps.release_meta.outputs.tag }}
       name: ${{ steps.release_meta.outputs.name }}
+      upstream_ref: ${{ steps.downstream_source.outputs.upstream_ref }}
+      source_sha: ${{ steps.downstream_source.outputs.source_sha }}
     env:
       # The desktop packager writes these coordinates into electron-updater
       # metadata. They are validated from the finished AppImage below.
       T3CODE_DESKTOP_UPDATE_REPOSITORY: ${{ github.repository }}
     steps:
-      - name: Fetch trusted source archive
+      - name: Checkout downstream overlay
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - id: downstream_source
+        name: Fetch upstream release and apply downstream overlay
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          REQUESTED_UPSTREAM_REF: ${{ inputs.upstream_ref }}
+          SOURCE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
         run: |
           set -euo pipefail
-          curl --fail-with-body --location --retry 3 \
-            --header "Authorization: Bearer $GITHUB_TOKEN" \
-            --header "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/tarball/${GITHUB_SHA}" \
-            --output "$RUNNER_TEMP/source.tar.gz"
-          tar --extract --gzip --file "$RUNNER_TEMP/source.tar.gz" \
-            --strip-components=1 --directory "$GITHUB_WORKSPACE"
+          overlay_staging="$RUNNER_TEMP/t3-downstream-overlay"
+          mkdir -p "$overlay_staging"
+          cp -R "$GITHUB_WORKSPACE/downstream" "$overlay_staging/downstream"
+          cp "$GITHUB_WORKSPACE/scripts/apply-downstream-overlay.sh" "$overlay_staging/"
+          cp "$GITHUB_WORKSPACE/scripts/apply-downstream-overlay.test.ts" "$overlay_staging/"
+          manifest="$overlay_staging/downstream/overlay.json"
+          readarray -t manifest_metadata < <(node --input-type=module - "$manifest" <<'NODE'
+          import { readFileSync } from "node:fs";
+          const manifest = JSON.parse(readFileSync(process.argv[2], "utf8"));
+          console.log(manifest.upstreamRef);
+          console.log(manifest.upstreamCommit);
+          console.log(manifest.patch);
+          NODE
+          )"
+          manifest_ref="${manifest_metadata[0]}"
+          expected_upstream_commit="${manifest_metadata[1]}"
+          patch_name="${manifest_metadata[2]}"
+          upstream_ref="${REQUESTED_UPSTREAM_REF:-$manifest_ref}"
+          if [[ "$manifest_ref" != "$upstream_ref" ]]; then
+            echo "Workflow upstream_ref '$upstream_ref' does not match overlay manifest '$manifest_ref'." >&2
+            echo "Regenerate the overlay for the new upstream release before building it." >&2
+            exit 1
+          fi
+          if [[ ! "$upstream_ref" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-nightly\.[0-9]{8}\.[0-9]+)?$ ]]; then
+            echo "Refusing non-release upstream ref: $upstream_ref" >&2
+            exit 1
+          fi
+          tag_refs="$(git ls-remote "https://github.com/pingdotgg/t3code.git" \
+            "refs/tags/${upstream_ref}" "refs/tags/${upstream_ref}^{}")"
+          actual_upstream_commit="$(awk -v ref="refs/tags/${upstream_ref}^{}" '$2 == ref { print $1; exit }' <<<"$tag_refs")"
+          if [[ -z "$actual_upstream_commit" ]]; then
+            actual_upstream_commit="$(awk -v ref="refs/tags/${upstream_ref}" '$2 == ref { print $1; exit }' <<<"$tag_refs")"
+          fi
+          if [[ "$actual_upstream_commit" != "$expected_upstream_commit" ]]; then
+            echo "Upstream tag $upstream_ref resolved to '$actual_upstream_commit', expected '$expected_upstream_commit'." >&2
+            exit 1
+          fi
+          overlay_patch="$overlay_staging/downstream/$patch_name"
+          test -f "$overlay_patch"
+          git -C "$GITHUB_WORKSPACE" fetch --no-tags --depth=1 \
+            https://github.com/pingdotgg/t3code.git "$expected_upstream_commit"
+          generated_patch="$RUNNER_TEMP/generated-downstream-overlay.patch"
+          git -C "$GITHUB_WORKSPACE" diff --binary --full-index "$expected_upstream_commit" -- \
+            . \
+            ':(exclude).github' \
+            ':(exclude)docs/downstream-releases.md' \
+            ':(exclude)downstream' \
+            ':(exclude)scripts/apply-downstream-overlay.sh' \
+            ':(exclude)scripts/apply-downstream-overlay.test.ts' \
+            ':(exclude)scripts/sync-upstream.sh' \
+            > "$generated_patch"
+          if ! cmp -s "$generated_patch" "$overlay_patch"; then
+            echo "The committed downstream overlay does not match the triggering source commit." >&2
+            exit 1
+          fi
+          git -C "$GITHUB_WORKSPACE" remote get-url upstream >/dev/null 2>&1 || \
+            git -C "$GITHUB_WORKSPACE" remote add upstream https://github.com/pingdotgg/t3code.git
+          git -C "$GITHUB_WORKSPACE" checkout --detach "$expected_upstream_commit"
+          cp "$overlay_staging/apply-downstream-overlay.sh" \
+            "$GITHUB_WORKSPACE/scripts/apply-downstream-overlay.sh"
+          cp "$overlay_staging/apply-downstream-overlay.test.ts" \
+            "$GITHUB_WORKSPACE/scripts/apply-downstream-overlay.test.ts"
+          bash "$overlay_staging/apply-downstream-overlay.sh" \
+            --manifest "$manifest" \
+            --source-dir "$GITHUB_WORKSPACE" \
+            --apply
+          test -f "$GITHUB_WORKSPACE/apps/server/src/provider/Drivers/AntigravityDriver.ts"
+          for quality_gate in \
+            apps/server/src/provider/piRpcManager.test.ts \
+            apps/server/src/provider/piRpcProtocol.test.ts \
+            apps/server/src/provider/Layers/AntigravityAdapter.test.ts \
+            apps/web/src/components/settings/providerDriverMeta.test.ts \
+            scripts/apply-downstream-overlay.test.ts; do
+            test -f "$GITHUB_WORKSPACE/$quality_gate"
+          done
+          echo "upstream_ref=$upstream_ref" >> "$GITHUB_OUTPUT"
+          echo "source_sha=${SOURCE_SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Setup Vite+
         uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
@@ -51,11 +151,22 @@ jobs:
       - name: Ensure Electron runtime is installed
         run: vp run --filter @t3tools/desktop ensure:electron
 
+      - name: Run downstream quality gates
+        run: |
+          set -euo pipefail
+          vp test run \
+            apps/server/src/provider/piRpcManager.test.ts \
+            apps/server/src/provider/piRpcProtocol.test.ts \
+            apps/server/src/provider/Layers/AntigravityAdapter.test.ts \
+            apps/web/src/components/settings/providerDriverMeta.test.ts \
+            scripts/apply-downstream-overlay.test.ts
+          pnpm run typecheck
+
       - id: release_meta
         name: Resolve nightly version and unique release tag
         shell: bash
         env:
-          NIGHTLY_SHA: ${{ github.sha }}
+          NIGHTLY_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
           NIGHTLY_RUN_NUMBER: ${{ github.run_number }}
         run: |
           set -euo pipefail
@@ -74,9 +185,6 @@ jobs:
           short_sha="$(sed -n 's/^short_sha=//p' "$metadata_file")"
           echo "tag=v${version}" >> "$GITHUB_OUTPUT"
           echo "name=T3 Code Fork Nightly ${version} (${short_sha})" >> "$GITHUB_OUTPUT"
-
-      - name: Align package versions to nightly version
-        run: node scripts/update-release-package-versions.ts "${{ steps.release_meta.outputs.version }}"
 
       - name: Install ImageMagick
         shell: bash
@@ -206,7 +314,7 @@ jobs:
         with:
           tag_name: ${{ needs.build.outputs.tag }}
           name: ${{ needs.build.outputs.name }}
-          target_commitish: ${{ github.sha }}
+          target_commitish: ${{ needs.build.outputs.source_sha }}
           prerelease: true
           make_latest: false
           generate_release_notes: true

@@ -1,0 +1,4777 @@
+diff --git a/apps/server/src/provider/Drivers/AntigravityDriver.ts b/apps/server/src/provider/Drivers/AntigravityDriver.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..06f2218dba63eaa0c536d42db5176c6b7130d0aa
+--- /dev/null
++++ b/apps/server/src/provider/Drivers/AntigravityDriver.ts
+@@ -0,0 +1,159 @@
++import {
++  AntigravitySettings,
++  ProviderDriverKind,
++  TextGenerationError,
++  type ServerProvider,
++} from "@t3tools/contracts";
++import * as DateTime from "effect/DateTime";
++import * as Effect from "effect/Effect";
++import * as FileSystem from "effect/FileSystem";
++import * as Schema from "effect/Schema";
++import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
++import { ServerConfig } from "../../config.ts";
++import { ServerSettingsService } from "../../serverSettings.ts";
++import { makeAntigravityAdapter } from "../Layers/AntigravityAdapter.ts";
++import { buildServerProvider, type ServerProviderDraft } from "../providerSnapshot.ts";
++import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
++import { makeManualOnlyProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
++import {
++  haveProviderSnapshotSettingsChanged,
++  makeProviderSnapshotSettingsSource,
++  type ProviderSnapshotSettings,
++} from "../providerUpdateSettings.ts";
++import {
++  defaultProviderContinuationIdentity,
++  type ProviderDriver,
++  type ProviderInstance,
++} from "../ProviderDriver.ts";
++import * as TextGeneration from "../../textGeneration/TextGeneration.ts";
++import { ProviderDriverError } from "../Errors.ts";
++
++const DRIVER_KIND = ProviderDriverKind.make("antigravity");
++const decodeSettings = Schema.decodeSync(AntigravitySettings);
++
++const stamp =
++  (input: {
++    instanceId: ProviderInstance["instanceId"];
++    displayName: string | undefined;
++    accentColor?: string | undefined;
++    continuationKey: string;
++  }) =>
++  (snapshot: ServerProviderDraft): ServerProvider => ({
++    ...snapshot,
++    instanceId: input.instanceId,
++    driver: DRIVER_KIND,
++    ...(input.displayName ? { displayName: input.displayName } : {}),
++    ...(input.accentColor ? { accentColor: input.accentColor } : {}),
++    continuation: { groupKey: input.continuationKey },
++  });
++
++const providerSnapshot = (settings: AntigravitySettings): Effect.Effect<ServerProviderDraft> =>
++  Effect.map(DateTime.now, DateTime.formatIso).pipe(
++    Effect.map((checkedAt) =>
++      buildServerProvider({
++        presentation: { displayName: "Antigravity", showInteractionModeToggle: false },
++        enabled: settings.enabled,
++        checkedAt,
++        models: [],
++        probe: {
++          installed: true,
++          version: null,
++          status: "ready",
++          auth: { status: "unknown" },
++          message: "Antigravity CLI is configured; authentication is checked when a turn starts.",
++        },
++      }),
++    ),
++  );
++
++const unsupportedTextGeneration = <A>(operation: string): Effect.Effect<A, TextGenerationError> =>
++  Effect.fail(
++    new TextGenerationError({
++      operation,
++      detail: "Antigravity text generation is not part of the conversational adapter.",
++    }),
++  );
++const textGeneration = (): TextGeneration.TextGeneration["Service"] => ({
++  generateCommitMessage: () => unsupportedTextGeneration("generateCommitMessage"),
++  generatePrContent: () => unsupportedTextGeneration("generatePrContent"),
++  generateBranchName: () => unsupportedTextGeneration("generateBranchName"),
++  generateThreadTitle: () => unsupportedTextGeneration("generateThreadTitle"),
++});
++
++export type AntigravityDriverEnv =
++  | BackgroundPolicy.BackgroundPolicy
++  | FileSystem.FileSystem
++  | ServerConfig
++  | ServerSettingsService;
++
++export const AntigravityDriver: ProviderDriver<AntigravitySettings, AntigravityDriverEnv> = {
++  driverKind: DRIVER_KIND,
++  metadata: { displayName: "Antigravity", supportsMultipleInstances: true },
++  configSchema: AntigravitySettings,
++  defaultConfig: () => decodeSettings({}),
++  create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
++    Effect.gen(function* () {
++      const serverSettings = yield* ServerSettingsService;
++      const identity = defaultProviderContinuationIdentity({ driverKind: DRIVER_KIND, instanceId });
++      const effective = { ...config, enabled } satisfies AntigravitySettings;
++      const adapter = yield* makeAntigravityAdapter({
++        instanceId,
++        binaryPath: effective.binaryPath,
++        environment: Object.fromEntries(environment.map(({ name, value }) => [name, value])),
++      });
++      const settings = makeProviderSnapshotSettingsSource(effective, serverSettings);
++      const snapshot = yield* makeManagedServerProvider<
++        ProviderSnapshotSettings<AntigravitySettings>
++      >({
++        maintenanceCapabilities: makeManualOnlyProviderMaintenanceCapabilities({
++          provider: DRIVER_KIND,
++          packageName: null,
++        }),
++        getSettings: settings.getSettings,
++        streamSettings: settings.streamSettings,
++        haveSettingsChanged: haveProviderSnapshotSettingsChanged,
++        initialSnapshot: (next) =>
++          providerSnapshot(next.provider).pipe(
++            Effect.map(
++              stamp({
++                instanceId,
++                displayName,
++                accentColor,
++                continuationKey: identity.continuationKey,
++              }),
++            ),
++          ),
++        checkProvider: providerSnapshot(effective).pipe(
++          Effect.map(
++            stamp({
++              instanceId,
++              displayName,
++              accentColor,
++              continuationKey: identity.continuationKey,
++            }),
++          ),
++        ),
++      }).pipe(
++        Effect.mapError(
++          (cause) =>
++            new ProviderDriverError({
++              driver: DRIVER_KIND,
++              instanceId,
++              detail: cause.message,
++              cause,
++            }),
++        ),
++      );
++      return {
++        instanceId,
++        driverKind: DRIVER_KIND,
++        continuationIdentity: identity,
++        displayName,
++        accentColor,
++        enabled,
++        snapshot,
++        adapter,
++        textGeneration: textGeneration(),
++      } satisfies ProviderInstance;
++    }),
++};
+diff --git a/apps/server/src/provider/Drivers/PiDriver.ts b/apps/server/src/provider/Drivers/PiDriver.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..de1c1a2d911af7c910d6d413b72641313aff68be
+--- /dev/null
++++ b/apps/server/src/provider/Drivers/PiDriver.ts
+@@ -0,0 +1,213 @@
++import {
++  PiSettings,
++  ProviderDriverKind,
++  TextGenerationError,
++  type ServerProvider,
++} from "@t3tools/contracts";
++import * as DateTime from "effect/DateTime";
++import * as Effect from "effect/Effect";
++import * as FileSystem from "effect/FileSystem";
++import * as Schema from "effect/Schema";
++import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
++import { ServerConfig } from "../../config.ts";
++import { ServerSettingsService } from "../../serverSettings.ts";
++import { makePiAdapter } from "../Layers/PiAdapter.ts";
++import { buildServerProvider, type ServerProviderDraft } from "../providerSnapshot.ts";
++import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
++import { makeManualOnlyProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
++import {
++  haveProviderSnapshotSettingsChanged,
++  makeProviderSnapshotSettingsSource,
++  type ProviderSnapshotSettings,
++} from "../providerUpdateSettings.ts";
++import {
++  defaultProviderContinuationIdentity,
++  type ProviderDriver,
++  type ProviderInstance,
++} from "../ProviderDriver.ts";
++import { PiRpcManager } from "../piRpcManager.ts";
++import * as TextGeneration from "../../textGeneration/TextGeneration.ts";
++import { ProviderDriverError } from "../Errors.ts";
++
++const DRIVER_KIND = ProviderDriverKind.make("pi");
++const decodePiSettings = Schema.decodeSync(PiSettings);
++
++function stamp(input: {
++  readonly instanceId: ProviderInstance["instanceId"];
++  readonly displayName: string | undefined;
++  readonly accentColor?: string | undefined;
++  readonly continuationKey: string;
++}) {
++  return (snapshot: ServerProviderDraft): ServerProvider => ({
++    ...snapshot,
++    instanceId: input.instanceId,
++    driver: DRIVER_KIND,
++    ...(input.displayName ? { displayName: input.displayName } : {}),
++    ...(input.accentColor ? { accentColor: input.accentColor } : {}),
++    continuation: { groupKey: input.continuationKey },
++  });
++}
++
++function pending(settings: PiSettings): Effect.Effect<ServerProviderDraft> {
++  return Effect.map(DateTime.now, DateTime.formatIso).pipe(
++    Effect.map((checkedAt) =>
++      buildServerProvider({
++        presentation: { displayName: "Pi", showInteractionModeToggle: false },
++        enabled: settings.enabled,
++        checkedAt,
++        models: [],
++        probe: {
++          installed: false,
++          version: null,
++          status: "warning",
++          auth: { status: "unknown" },
++          message: "Pi provider status has not been checked in this session yet.",
++        },
++      }),
++    ),
++  );
++}
++
++function check(
++  settings: PiSettings,
++  cwd: string,
++  environment: NodeJS.ProcessEnv,
++): Effect.Effect<ServerProviderDraft> {
++  return Effect.gen(function* () {
++    const checkedAt = DateTime.formatIso(yield* DateTime.now);
++    if (!settings.enabled)
++      return buildServerProvider({
++        presentation: { displayName: "Pi", showInteractionModeToggle: false },
++        enabled: false,
++        checkedAt,
++        models: [],
++        probe: {
++          installed: false,
++          version: null,
++          status: "warning",
++          auth: { status: "unknown" },
++          message: "Pi is disabled in T3 Code settings.",
++        },
++      });
++    const models = yield* Effect.promise(() =>
++      new PiRpcManager({
++        binaryPath: settings.binaryPath,
++        ...(settings.agentDir ? { agentDir: settings.agentDir } : {}),
++        environment,
++      }).discoverModels(cwd),
++    ).pipe(Effect.orElseSucceed(() => []));
++    return buildServerProvider({
++      presentation: { displayName: "Pi", showInteractionModeToggle: false },
++      enabled: true,
++      checkedAt,
++      models,
++      probe: {
++        installed: models.length > 0,
++        version: null,
++        status: models.length > 0 ? "ready" : "error",
++        auth: { status: "unknown" },
++        ...(models.length > 0
++          ? {}
++          : {
++              message: `Pi CLI (${settings.binaryPath}) is unavailable or has no configured models.`,
++            }),
++      },
++    });
++  });
++}
++
++const unsupportedTextGeneration = <A>(operation: string): Effect.Effect<A, TextGenerationError> =>
++  Effect.fail(
++    new TextGenerationError({
++      operation,
++      detail: "Pi text generation is not supported by this v1 adapter.",
++    }),
++  );
++const makeTextGeneration = (): TextGeneration.TextGeneration["Service"] => ({
++  generateCommitMessage: (_input) => unsupportedTextGeneration("generateCommitMessage"),
++  generatePrContent: (_input) => unsupportedTextGeneration("generatePrContent"),
++  generateBranchName: (_input) => unsupportedTextGeneration("generateBranchName"),
++  generateThreadTitle: (_input) => unsupportedTextGeneration("generateThreadTitle"),
++});
++
++export type PiDriverEnv =
++  | BackgroundPolicy.BackgroundPolicy
++  | FileSystem.FileSystem
++  | ServerConfig
++  | ServerSettingsService;
++
++export const PiDriver: ProviderDriver<PiSettings, PiDriverEnv> = {
++  driverKind: DRIVER_KIND,
++  metadata: { displayName: "Pi", supportsMultipleInstances: true },
++  configSchema: PiSettings,
++  defaultConfig: () => decodePiSettings({}),
++  create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
++    Effect.gen(function* () {
++      const serverConfig = yield* ServerConfig;
++      const serverSettings = yield* ServerSettingsService;
++      const identity = defaultProviderContinuationIdentity({ driverKind: DRIVER_KIND, instanceId });
++      const effective = { ...config, enabled } satisfies PiSettings;
++      const adapter = yield* makePiAdapter({
++        instanceId,
++        binaryPath: effective.binaryPath,
++        ...(effective.agentDir ? { agentDir: effective.agentDir } : {}),
++        environment: Object.fromEntries(environment.map(({ name, value }) => [name, value])),
++      });
++      const settings = makeProviderSnapshotSettingsSource(effective, serverSettings);
++      const snapshot = yield* makeManagedServerProvider<ProviderSnapshotSettings<PiSettings>>({
++        maintenanceCapabilities: makeManualOnlyProviderMaintenanceCapabilities({
++          provider: DRIVER_KIND,
++          packageName: null,
++        }),
++        getSettings: settings.getSettings,
++        streamSettings: settings.streamSettings,
++        haveSettingsChanged: haveProviderSnapshotSettingsChanged,
++        initialSnapshot: (next) =>
++          pending(next.provider).pipe(
++            Effect.map(
++              stamp({
++                instanceId,
++                displayName,
++                accentColor,
++                continuationKey: identity.continuationKey,
++              }),
++            ),
++          ),
++        checkProvider: check(
++          effective,
++          serverConfig.cwd,
++          Object.fromEntries(environment.map(({ name, value }) => [name, value])),
++        ).pipe(
++          Effect.map(
++            stamp({
++              instanceId,
++              displayName,
++              accentColor,
++              continuationKey: identity.continuationKey,
++            }),
++          ),
++        ),
++      }).pipe(
++        Effect.mapError(
++          (cause) =>
++            new ProviderDriverError({
++              driver: DRIVER_KIND,
++              instanceId,
++              detail: cause.message,
++              cause,
++            }),
++        ),
++      );
++      return {
++        instanceId,
++        driverKind: DRIVER_KIND,
++        continuationIdentity: identity,
++        displayName,
++        accentColor,
++        enabled,
++        snapshot,
++        adapter,
++        textGeneration: makeTextGeneration(),
++      } satisfies ProviderInstance;
++    }),
++};
+diff --git a/apps/server/src/provider/Drivers/PrimeAgentDriver.ts b/apps/server/src/provider/Drivers/PrimeAgentDriver.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..047efc156fec7541caccd046620058c33ccbeb1a
+--- /dev/null
++++ b/apps/server/src/provider/Drivers/PrimeAgentDriver.ts
+@@ -0,0 +1,199 @@
++import {
++  PrimeAgentSettings,
++  ProviderDriverKind,
++  TextGenerationError,
++  type ServerProvider,
++} from "@t3tools/contracts";
++import * as DateTime from "effect/DateTime";
++import * as Effect from "effect/Effect";
++import * as FileSystem from "effect/FileSystem";
++import * as Schema from "effect/Schema";
++import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
++import { ServerConfig } from "../../config.ts";
++import { ServerSettingsService } from "../../serverSettings.ts";
++import { makeAgentAdapter } from "../Layers/PiAdapter.ts";
++import { buildServerProvider, type ServerProviderDraft } from "../providerSnapshot.ts";
++import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
++import { makeManualOnlyProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
++import {
++  haveProviderSnapshotSettingsChanged,
++  makeProviderSnapshotSettingsSource,
++  type ProviderSnapshotSettings,
++} from "../providerUpdateSettings.ts";
++import {
++  defaultProviderContinuationIdentity,
++  type ProviderDriver,
++  type ProviderInstance,
++} from "../ProviderDriver.ts";
++import { PiRpcManager } from "../piRpcManager.ts";
++import * as TextGeneration from "../../textGeneration/TextGeneration.ts";
++import { ProviderDriverError } from "../Errors.ts";
++
++const DRIVER_KIND = ProviderDriverKind.make("primeAgent");
++const decodeSettings = Schema.decodeSync(PrimeAgentSettings);
++
++const stamp =
++  (
++    instanceId: ProviderInstance["instanceId"],
++    displayName: string | undefined,
++    accentColor: string | undefined,
++    continuationKey: string,
++  ) =>
++  (snapshot: ServerProviderDraft): ServerProvider => ({
++    ...snapshot,
++    instanceId,
++    driver: DRIVER_KIND,
++    ...(displayName ? { displayName } : {}),
++    ...(accentColor ? { accentColor } : {}),
++    continuation: { groupKey: continuationKey },
++  });
++
++const snapshot = (
++  settings: PrimeAgentSettings,
++  name: string,
++  message: string,
++): Effect.Effect<ServerProviderDraft> =>
++  Effect.map(DateTime.now, DateTime.formatIso).pipe(
++    Effect.map((checkedAt) =>
++      buildServerProvider({
++        presentation: { displayName: name, showInteractionModeToggle: false },
++        enabled: settings.enabled,
++        checkedAt,
++        models: [],
++        probe: {
++          installed: false,
++          version: null,
++          status: "warning",
++          auth: { status: "unknown" },
++          message,
++        },
++      }),
++    ),
++  );
++
++const check = (
++  settings: PrimeAgentSettings,
++  cwd: string,
++  environment: NodeJS.ProcessEnv,
++): Effect.Effect<ServerProviderDraft> =>
++  Effect.gen(function* () {
++    const checkedAt = DateTime.formatIso(yield* DateTime.now);
++    if (!settings.enabled)
++      return yield* snapshot(
++        settings,
++        "Prime Agent",
++        "Prime Agent is disabled in T3 Code settings.",
++      );
++    const models = yield* Effect.promise(() =>
++      new PiRpcManager({
++        binaryPath: settings.binaryPath,
++        ...(settings.agentDir ? { agentDir: settings.agentDir } : {}),
++        environment,
++        provider: DRIVER_KIND,
++        providerName: "Prime Agent",
++      }).discoverModels(cwd),
++    ).pipe(Effect.orElseSucceed(() => []));
++    return buildServerProvider({
++      presentation: { displayName: "Prime Agent", showInteractionModeToggle: false },
++      enabled: true,
++      checkedAt,
++      models,
++      probe: {
++        installed: models.length > 0,
++        version: null,
++        status: models.length > 0 ? "ready" : "error",
++        auth: { status: "unknown" },
++        ...(models.length > 0
++          ? {}
++          : {
++              message: `Prime Agent CLI (${settings.binaryPath}) is unavailable or has no configured models.`,
++            }),
++      },
++    });
++  });
++
++const unsupportedTextGeneration = <A>(operation: string): Effect.Effect<A, TextGenerationError> =>
++  Effect.fail(
++    new TextGenerationError({
++      operation,
++      detail: "Prime Agent text generation is not supported by this adapter.",
++    }),
++  );
++const textGeneration = (): TextGeneration.TextGeneration["Service"] => ({
++  generateCommitMessage: () => unsupportedTextGeneration("generateCommitMessage"),
++  generatePrContent: () => unsupportedTextGeneration("generatePrContent"),
++  generateBranchName: () => unsupportedTextGeneration("generateBranchName"),
++  generateThreadTitle: () => unsupportedTextGeneration("generateThreadTitle"),
++});
++
++export type PrimeAgentDriverEnv =
++  | BackgroundPolicy.BackgroundPolicy
++  | FileSystem.FileSystem
++  | ServerConfig
++  | ServerSettingsService;
++
++export const PrimeAgentDriver: ProviderDriver<PrimeAgentSettings, PrimeAgentDriverEnv> = {
++  driverKind: DRIVER_KIND,
++  metadata: { displayName: "Prime Agent", supportsMultipleInstances: true },
++  configSchema: PrimeAgentSettings,
++  defaultConfig: () => decodeSettings({}),
++  create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
++    Effect.gen(function* () {
++      const serverConfig = yield* ServerConfig;
++      const serverSettings = yield* ServerSettingsService;
++      const identity = defaultProviderContinuationIdentity({ driverKind: DRIVER_KIND, instanceId });
++      const effective = { ...config, enabled } satisfies PrimeAgentSettings;
++      const adapter = yield* makeAgentAdapter({
++        instanceId,
++        binaryPath: effective.binaryPath,
++        ...(effective.agentDir ? { agentDir: effective.agentDir } : {}),
++        provider: DRIVER_KIND,
++        providerName: "Prime Agent",
++        environment: Object.fromEntries(environment.map(({ name, value }) => [name, value])),
++      });
++      const settings = makeProviderSnapshotSettingsSource(effective, serverSettings);
++      const managed = yield* makeManagedServerProvider<
++        ProviderSnapshotSettings<PrimeAgentSettings>
++      >({
++        maintenanceCapabilities: makeManualOnlyProviderMaintenanceCapabilities({
++          provider: DRIVER_KIND,
++          packageName: null,
++        }),
++        getSettings: settings.getSettings,
++        streamSettings: settings.streamSettings,
++        haveSettingsChanged: haveProviderSnapshotSettingsChanged,
++        initialSnapshot: (next) =>
++          snapshot(
++            next.provider,
++            "Prime Agent",
++            "Prime Agent provider status has not been checked in this session yet.",
++          ).pipe(Effect.map(stamp(instanceId, displayName, accentColor, identity.continuationKey))),
++        checkProvider: check(
++          effective,
++          serverConfig.cwd,
++          Object.fromEntries(environment.map(({ name, value }) => [name, value])),
++        ).pipe(Effect.map(stamp(instanceId, displayName, accentColor, identity.continuationKey))),
++      }).pipe(
++        Effect.mapError(
++          (cause) =>
++            new ProviderDriverError({
++              driver: DRIVER_KIND,
++              instanceId,
++              detail: cause.message,
++              cause,
++            }),
++        ),
++      );
++      return {
++        instanceId,
++        driverKind: DRIVER_KIND,
++        continuationIdentity: identity,
++        displayName,
++        accentColor,
++        enabled,
++        snapshot: managed,
++        adapter,
++        textGeneration: textGeneration(),
++      } satisfies ProviderInstance;
++    }),
++};
+diff --git a/apps/server/src/provider/Layers/AntigravityAdapter.test.ts b/apps/server/src/provider/Layers/AntigravityAdapter.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..76e9d1828dd7fb7d7a87564b53ab5e3045dfded7
+--- /dev/null
++++ b/apps/server/src/provider/Layers/AntigravityAdapter.test.ts
+@@ -0,0 +1,105 @@
++// @effect-diagnostics nodeBuiltinImport:off
++import { PassThrough } from "node:stream";
++import type * as NodeChildProcess from "node:child_process";
++import * as Effect from "effect/Effect";
++import * as Stream from "effect/Stream";
++import { ProviderInstanceId, ThreadId } from "@t3tools/contracts";
++import { describe, expect, it, vi } from "vite-plus/test";
++import { makeAntigravityAdapter, parseAntigravityStreamJsonLine } from "./AntigravityAdapter.ts";
++
++const { spawn } = vi.hoisted(() => ({ spawn: vi.fn() }));
++vi.mock("node:child_process", () => ({ spawn }));
++
++const makeChild = () => {
++  const child = Object.assign(new PassThrough(), {
++    stdout: new PassThrough(),
++    stderr: new PassThrough(),
++    kill: vi.fn(() => true),
++  });
++  return child as unknown as NodeChildProcess.ChildProcessWithoutNullStreams;
++};
++
++describe("Antigravity stream-json", () => {
++  it("extracts assistant text and ignores non-text events", () => {
++    expect(parseAntigravityStreamJsonLine('{"type":"assistant","text":"Hola"}')).toBe("Hola");
++    expect(
++      parseAntigravityStreamJsonLine(
++        '{"type":"assistant","message":{"content":[{"type":"text","text":" mundo"}]}}',
++      ),
++    ).toBe(" mundo");
++    expect(parseAntigravityStreamJsonLine('{"type":"tool_use","name":"shell"}')).toBeUndefined();
++    expect(parseAntigravityStreamJsonLine("not json")).toBeUndefined();
++  });
++
++  it("extracts incremental text deltas from stream-json events", () => {
++    expect(parseAntigravityStreamJsonLine('{"type":"init"}')).toBeUndefined();
++    expect(
++      parseAntigravityStreamJsonLine(
++        '{"type":"step_update","step_type":"tool_call","tool_info":{"name":"bash"}}',
++      ),
++    ).toBeUndefined();
++    expect(
++      parseAntigravityStreamJsonLine(
++        '{"type":"step_update","step_type":"agent_response","text_delta":"uno"}',
++      ),
++    ).toBe("uno");
++    expect(
++      parseAntigravityStreamJsonLine(
++        '{"type":"content_block_delta","delta":{"type":"text_delta","text":"uno"}}',
++      ),
++    ).toBe("uno");
++    expect(parseAntigravityStreamJsonLine('{"type":"message_delta","delta":{"text":" dos"}}')).toBe(
++      " dos",
++    );
++    expect(parseAntigravityStreamJsonLine('{"type":"result","status":"success"}')).toBeUndefined();
++    expect(parseAntigravityStreamJsonLine('{"type":"result","response":"uno dos"}', "uno")).toBe(
++      " dos",
++    );
++  });
++
++  it("turns cumulative assistant snapshots into only the unseen suffix", () => {
++    expect(
++      parseAntigravityStreamJsonLine(
++        '{"type":"assistant","message":{"content":[{"type":"text","text":"hola mundo"}]}}',
++        "hola",
++      ),
++    ).toBe(" mundo");
++  });
++});
++
++it("keeps an interrupted child owned until close and emits one completion", async () => {
++  const firstChild = makeChild();
++  const secondChild = makeChild();
++  spawn.mockReset().mockReturnValueOnce(firstChild).mockReturnValueOnce(secondChild);
++
++  const adapter = await Effect.runPromise(
++    makeAntigravityAdapter({
++      instanceId: ProviderInstanceId.make("instance"),
++      binaryPath: "agy-direct",
++    }),
++  );
++  const threadId = ThreadId.make("thread");
++  await Effect.runPromise(adapter.startSession({ threadId, runtimeMode: "full-access" }));
++  const eventsPromise = Effect.runPromise(
++    Stream.take(adapter.streamEvents, 2).pipe(Stream.runCollect),
++  );
++
++  await Effect.runPromise(adapter.sendTurn({ threadId, input: "hello" }));
++  await Effect.runPromise(adapter.interruptTurn(threadId));
++  const interruptedEvents = await eventsPromise;
++
++  expect(firstChild.kill).toHaveBeenCalledWith("SIGINT");
++  expect(interruptedEvents.filter((event) => event.type === "turn.completed")).toHaveLength(1);
++  let blockedError: unknown;
++  try {
++    await Effect.runPromise(adapter.sendTurn({ threadId, input: "should wait" }));
++  } catch (error) {
++    blockedError = error;
++  }
++  expect(blockedError).toBeDefined();
++  expect(String(blockedError)).toContain("already streaming a turn");
++
++  firstChild.emit("close", 130, "SIGINT");
++  await Effect.runPromise(adapter.sendTurn({ threadId, input: "after close" }));
++  expect(spawn).toHaveBeenCalledTimes(2);
++});
+diff --git a/apps/server/src/provider/Layers/AntigravityAdapter.ts b/apps/server/src/provider/Layers/AntigravityAdapter.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..804816d9702b61cbe761b3e2e9b34db53d525750
+--- /dev/null
++++ b/apps/server/src/provider/Layers/AntigravityAdapter.ts
+@@ -0,0 +1,425 @@
++// @effect-diagnostics nodeBuiltinImport:off cryptoRandomUUID:off cryptoRandomUUIDInEffect:off globalDate:off runEffectInsideEffect:off
++import * as NodeChildProcess from "node:child_process";
++import * as NodeStringDecoder from "node:string_decoder";
++import {
++  EventId,
++  ProviderDriverKind,
++  ProviderInstanceId,
++  RuntimeItemId,
++  type ProviderRuntimeEvent,
++  type ProviderRuntimeItemCompletedEvent,
++  type ProviderRuntimeTurnStartedEvent,
++  type ProviderRuntimeTurnCompletedEvent,
++  type ProviderRuntimeContentDeltaEvent,
++  type ProviderRuntimeErrorEvent,
++  type ProviderSession,
++  type ProviderSendTurnInput,
++  type ProviderSessionStartInput,
++  type ThreadId,
++  TurnId,
++} from "@t3tools/contracts";
++import * as Effect from "effect/Effect";
++import * as Queue from "effect/Queue";
++import * as Stream from "effect/Stream";
++import {
++  ProviderAdapterProcessError,
++  ProviderAdapterRequestError,
++  ProviderAdapterSessionNotFoundError,
++  ProviderAdapterValidationError,
++  type ProviderAdapterError,
++} from "../Errors.ts";
++import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
++
++const PROVIDER = ProviderDriverKind.make("antigravity");
++const ASSISTANT_ITEM = `${PROVIDER}-assistant`;
++
++export function parseAntigravityStreamJsonLine(
++  line: string,
++  previousText = "",
++): string | undefined {
++  try {
++    const value: unknown = JSON.parse(line);
++    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
++    const record = value as Record<string, unknown>;
++    const recordType = typeof record.type === "string" ? record.type : undefined;
++    if (recordType === "step_update" && record.step_type === "agent_response") {
++      for (const key of ["text_delta", "delta", "text", "response"]) {
++        const text = record[key];
++        if (typeof text === "string" && text) return text;
++      }
++    }
++    if (recordType === "result") {
++      for (const key of ["response", "text", "result"]) {
++        const response = record[key];
++        if (typeof response === "string" && response) {
++          return response.startsWith(previousText)
++            ? response.slice(previousText.length) || undefined
++            : response;
++        }
++      }
++      return undefined;
++    }
++    const delta = record.delta;
++    if (
++      (recordType === "content_block_delta" || recordType === "message_delta") &&
++      delta &&
++      typeof delta === "object" &&
++      !Array.isArray(delta)
++    ) {
++      const text = (delta as Record<string, unknown>).text;
++      return typeof text === "string" && text ? text : undefined;
++    }
++    const direct =
++      (recordType === "text_delta" || recordType === "assistant") && typeof record.text === "string"
++        ? record.text
++        : undefined;
++    if (direct) return direct;
++    const message = record.message;
++    if (!message || typeof message !== "object" || Array.isArray(message)) return undefined;
++    const content = (message as Record<string, unknown>).content;
++    if (typeof content === "string") {
++      return content && content.startsWith(previousText)
++        ? content.slice(previousText.length) || undefined
++        : content || undefined;
++    }
++    if (!Array.isArray(content)) return undefined;
++    const snapshot = content
++      .flatMap((part) => {
++        if (!part || typeof part !== "object" || Array.isArray(part)) return [];
++        const text = (part as Record<string, unknown>).text;
++        return typeof text === "string" ? [text] : [];
++      })
++      .join("");
++    return snapshot && snapshot.startsWith(previousText)
++      ? snapshot.slice(previousText.length) || undefined
++      : snapshot || undefined;
++  } catch {
++    return undefined;
++  }
++}
++
++export interface AntigravityAdapterOptions {
++  readonly instanceId: ProviderInstanceId;
++  readonly binaryPath?: string;
++  readonly environment?: NodeJS.ProcessEnv;
++}
++
++interface Session {
++  readonly threadId: ThreadId;
++  readonly instanceId: ProviderInstanceId;
++  readonly cwd: string | undefined;
++  readonly queue: Queue.Queue<ProviderRuntimeEvent, never>;
++  child: NodeChildProcess.ChildProcessWithoutNullStreams | undefined;
++  turnId: TurnId | undefined;
++  text: string;
++  stopping: boolean;
++  completionEmitted: boolean;
++}
++
++function base(session: Session, turnId?: TurnId, itemId?: string) {
++  return {
++    eventId: EventId.make(globalThis.crypto.randomUUID()),
++    provider: PROVIDER,
++    providerInstanceId: session.instanceId,
++    threadId: session.threadId,
++    createdAt: new Date().toISOString(),
++    ...(turnId ? { turnId } : {}),
++    ...(itemId ? { itemId: RuntimeItemId.make(itemId) } : {}),
++  };
++}
++
++// Kept on the session rather than in a module-global so separate configured
++// Antigravity instances cannot share event identity or process state.
++type SessionWithInstance = Session;
++
++const assistantItemId = (session: SessionWithInstance, turnId: TurnId) =>
++  `${ASSISTANT_ITEM}:${session.threadId}:${turnId}`;
++
++function emitDelta(session: SessionWithInstance, turnId: TurnId, delta: string): void {
++  session.text += delta;
++  void Effect.runPromise(
++    Queue.offer(session.queue, {
++      type: "content.delta",
++      ...base(session, turnId, assistantItemId(session, turnId)),
++      payload: { streamKind: "assistant_text", delta },
++    } satisfies ProviderRuntimeContentDeltaEvent),
++  );
++}
++
++function isActiveTurn(session: SessionWithInstance, turnId: TurnId): boolean {
++  return session.turnId === turnId;
++}
++
++export function makeAntigravityAdapter(options: AntigravityAdapterOptions) {
++  return Effect.gen(function* () {
++    const queue = yield* Queue.unbounded<ProviderRuntimeEvent>();
++    const sessions = new Map<ThreadId, SessionWithInstance>();
++
++    const emit = (event: ProviderRuntimeEvent): void => {
++      void Effect.runPromise(Queue.offer(queue, event));
++    };
++    const startSession = (input: ProviderSessionStartInput): ProviderSession => {
++      let session = sessions.get(input.threadId);
++      if (!session) {
++        session = {
++          threadId: input.threadId,
++          instanceId: options.instanceId,
++          cwd: input.cwd,
++          queue,
++          child: undefined,
++          turnId: undefined,
++          text: "",
++          stopping: false,
++          completionEmitted: false,
++        };
++        sessions.set(input.threadId, session);
++      }
++      return {
++        provider: PROVIDER,
++        providerInstanceId: options.instanceId,
++        status: "ready",
++        runtimeMode: input.runtimeMode,
++        ...(input.cwd ? { cwd: input.cwd } : {}),
++        threadId: input.threadId,
++        createdAt: new Date().toISOString(),
++        updatedAt: new Date().toISOString(),
++      };
++    };
++
++    const sendTurn = (input: ProviderSendTurnInput) =>
++      Effect.tryPromise<
++        { readonly threadId: ThreadId; readonly turnId: TurnId },
++        ProviderAdapterError
++      >({
++        try: async () => {
++          const session = sessions.get(input.threadId);
++          if (!session)
++            throw new ProviderAdapterSessionNotFoundError({
++              provider: PROVIDER,
++              threadId: input.threadId,
++            });
++          if (session.child)
++            throw new ProviderAdapterRequestError({
++              provider: PROVIDER,
++              method: "turn/prompt",
++              detail: "Antigravity is already streaming a turn.",
++            });
++          const turnId = TurnId.make(globalThis.crypto.randomUUID());
++          session.turnId = turnId;
++          session.text = "";
++          session.stopping = false;
++          session.completionEmitted = false;
++          const model = input.modelSelection?.model;
++          const args = [
++            "--print",
++            "--output-format",
++            "stream-json",
++            ...(model ? ["--model", model] : []),
++            "--prompt",
++            input.input ?? "",
++          ];
++          emit({
++            type: "turn.started",
++            ...base(session, turnId),
++            payload: model ? { model } : {},
++          } satisfies ProviderRuntimeTurnStartedEvent);
++          const child = NodeChildProcess.spawn(options.binaryPath?.trim() || "agy-direct", args, {
++            ...(session.cwd ? { cwd: session.cwd } : {}),
++            env: { ...process.env, ...options.environment },
++            stdio: "pipe",
++          });
++          session.child = child;
++          const decoder = new NodeStringDecoder.StringDecoder("utf8");
++          let stdoutBuffer = "";
++          const consume = (chunk: Buffer, flush = false) => {
++            stdoutBuffer += decoder.write(chunk);
++            const lines = stdoutBuffer.split("\n");
++            stdoutBuffer = flush ? "" : (lines.pop() ?? "");
++            for (const line of lines) {
++              const delta = parseAntigravityStreamJsonLine(
++                line.endsWith("\r") ? line.slice(0, -1) : line,
++                session.text,
++              );
++              if (delta && isActiveTurn(session, turnId)) emitDelta(session, turnId, delta);
++            }
++          };
++          child.stdout.on("data", (chunk: Buffer) => {
++            consume(chunk);
++          });
++          child.stderr.on("data", () => undefined);
++          child.once("error", (cause) =>
++            finishFailure(session, turnId, cause instanceof Error ? cause.message : String(cause)),
++          );
++          child.once("close", (code, signal) => {
++            stdoutBuffer += decoder.end();
++            const finalLines = stdoutBuffer.split("\n");
++            stdoutBuffer = "";
++            for (const line of finalLines) {
++              const delta = parseAntigravityStreamJsonLine(
++                line.endsWith("\r") ? line.slice(0, -1) : line,
++                session.text,
++              );
++              if (delta && isActiveTurn(session, turnId)) emitDelta(session, turnId, delta);
++            }
++            if (session.child !== child) return;
++            if (session.completionEmitted) {
++              clearSessionTurn(session, child, turnId);
++              return;
++            }
++            if (!isActiveTurn(session, turnId)) return;
++            if (session.stopping) {
++              finishFailure(session, turnId, "Antigravity turn interrupted.", "interrupted");
++              clearSessionTurn(session, child, turnId);
++              return;
++            }
++            if (code !== 0 || signal) {
++              finishFailure(
++                session,
++                turnId,
++                `Antigravity CLI exited unsuccessfully (${code ?? "signal"}${signal ? `:${signal}` : ""}).`,
++              );
++              clearSessionTurn(session, child, turnId);
++              return;
++            }
++            emit({
++              type: "item.completed",
++              ...base(session, turnId, assistantItemId(session, turnId)),
++              payload: {
++                itemType: "assistant_message",
++                status: "completed",
++                title: "Assistant message",
++                ...(session.text ? { detail: session.text } : {}),
++              },
++            } satisfies ProviderRuntimeItemCompletedEvent);
++            emit({
++              type: "turn.completed",
++              ...base(session, turnId),
++              payload: { state: "completed", stopReason: "stop" },
++            } satisfies ProviderRuntimeTurnCompletedEvent);
++            clearSessionTurn(session, child, turnId);
++          });
++          return { threadId: input.threadId, turnId };
++        },
++        catch: (cause) =>
++          new ProviderAdapterProcessError({
++            provider: PROVIDER,
++            threadId: input.threadId,
++            detail: cause instanceof Error ? cause.message : String(cause),
++            cause,
++          }),
++      });
++
++    const finishFailure = (
++      session: SessionWithInstance,
++      turnId: TurnId,
++      message: string,
++      state: "failed" | "interrupted" = "failed",
++    ): void => {
++      if (!isActiveTurn(session, turnId)) return;
++      if (session.completionEmitted) return;
++      session.completionEmitted = true;
++      if (state === "failed")
++        emit({
++          type: "runtime.error",
++          ...base(session, turnId, assistantItemId(session, turnId)),
++          payload: { message, class: "transport_error" },
++        } satisfies ProviderRuntimeErrorEvent);
++      emit({
++        type: "turn.completed",
++        ...base(session, turnId),
++        payload: {
++          state,
++          ...(state === "interrupted" ? { stopReason: "interrupted" } : { errorMessage: message }),
++        },
++      } satisfies ProviderRuntimeTurnCompletedEvent);
++    };
++    const clearSessionTurn = (
++      session: SessionWithInstance,
++      child: NodeChildProcess.ChildProcessWithoutNullStreams,
++      turnId: TurnId,
++    ): void => {
++      if (session.child !== child) return;
++      session.child = undefined;
++      if (session.turnId === turnId) session.turnId = undefined;
++      session.stopping = false;
++      session.completionEmitted = false;
++    };
++
++    const adapter: ProviderAdapterShape<ProviderAdapterError> = {
++      provider: PROVIDER,
++      capabilities: { sessionModelSwitch: "unsupported" },
++      startSession: (input) => Effect.sync(() => startSession(input)),
++      sendTurn,
++      interruptTurn: (threadId, requestedTurnId) =>
++        Effect.sync(() => {
++          const session = sessions.get(threadId);
++          if (!session?.child || !session.turnId) return;
++          if (requestedTurnId && requestedTurnId !== session.turnId) return;
++          const turnId = session.turnId;
++          const child = session.child;
++          session.stopping = true;
++          session.completionEmitted = true;
++          session.turnId = undefined;
++          child.kill("SIGINT");
++          emit({
++            type: "turn.completed",
++            ...base(session, turnId),
++            payload: { state: "interrupted", stopReason: "interrupted" },
++          } satisfies ProviderRuntimeTurnCompletedEvent);
++        }),
++      respondToRequest: () =>
++        Effect.fail(
++          new ProviderAdapterValidationError({
++            provider: PROVIDER,
++            operation: "respondToRequest",
++            issue: "Antigravity has no approval protocol.",
++          }),
++        ),
++      respondToUserInput: () =>
++        Effect.fail(
++          new ProviderAdapterValidationError({
++            provider: PROVIDER,
++            operation: "respondToUserInput",
++            issue: "Antigravity has no user-input protocol.",
++          }),
++        ),
++      stopSession: (threadId) =>
++        Effect.sync(() => {
++          const session = sessions.get(threadId);
++          const child = session?.child;
++          if (session && child) {
++            session.stopping = true;
++            session.completionEmitted = true;
++            session.turnId = undefined;
++            child.kill("SIGTERM");
++          }
++          sessions.delete(threadId);
++        }),
++      listSessions: () =>
++        Effect.sync(() =>
++          Array.from(sessions.values()).map((session) =>
++            startSession({ threadId: session.threadId, runtimeMode: "full-access" }),
++          ),
++        ),
++      hasSession: (threadId) => Effect.sync(() => sessions.has(threadId)),
++      readThread: (threadId) =>
++        Effect.fail(new ProviderAdapterSessionNotFoundError({ provider: PROVIDER, threadId })),
++      rollbackThread: (threadId) =>
++        Effect.fail(new ProviderAdapterSessionNotFoundError({ provider: PROVIDER, threadId })),
++      stopAll: () =>
++        Effect.sync(() => {
++          for (const session of sessions.values())
++            if (session.child) {
++              const child = session.child;
++              session.stopping = true;
++              session.completionEmitted = true;
++              session.turnId = undefined;
++              child.kill("SIGTERM");
++            }
++          sessions.clear();
++        }),
++      streamEvents: Stream.fromQueue(queue),
++    };
++    return adapter;
++  });
++}
+diff --git a/apps/server/src/provider/Layers/PiAdapter.ts b/apps/server/src/provider/Layers/PiAdapter.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..5f93de732cdcbf8b1d68a3da18430211cb42b54d
+--- /dev/null
++++ b/apps/server/src/provider/Layers/PiAdapter.ts
+@@ -0,0 +1,275 @@
++// @effect-diagnostics globalDate:off runEffectInsideEffect:off
++import * as NodeCrypto from "node:crypto";
++import {
++  EventId,
++  ProviderDriverKind,
++  ProviderInstanceId,
++  RuntimeItemId,
++  type ProviderRuntimeEvent,
++  type ProviderSendTurnInput,
++  type ProviderSessionStartInput,
++  type ThreadId,
++  type TurnId,
++} from "@t3tools/contracts";
++import * as Effect from "effect/Effect";
++import * as FileSystem from "effect/FileSystem";
++import * as Queue from "effect/Queue";
++import * as Stream from "effect/Stream";
++import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
++import { resolveAttachmentPath } from "../../attachmentStore.ts";
++import { ServerConfig } from "../../config.ts";
++import {
++  ProviderAdapterProcessError,
++  ProviderAdapterRequestError,
++  ProviderAdapterSessionNotFoundError,
++  ProviderAdapterValidationError,
++  type ProviderAdapterError,
++} from "../Errors.ts";
++import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
++import { PiRpcManager, type PiRpcManagerEvent } from "../piRpcManager.ts";
++import { mapAgentRpcEvent } from "../piRpcProtocol.ts";
++
++function base(
++  provider: ProviderDriverKind,
++  threadId: ThreadId,
++  instanceId: ProviderInstanceId,
++  turnId?: TurnId,
++  itemId?: string,
++) {
++  return {
++    eventId: EventId.make(NodeCrypto.randomUUID()),
++    provider,
++    providerInstanceId: instanceId,
++    threadId,
++    createdAt: new Date().toISOString(),
++    ...(turnId ? { turnId } : {}),
++    ...(itemId ? { itemId: RuntimeItemId.make(itemId) } : {}),
++  };
++}
++
++function errorMessage(cause: unknown, fallback: string): string {
++  return cause instanceof Error && cause.message.trim() ? cause.message.trim() : fallback;
++}
++
++function mapManagerEvent(
++  event: PiRpcManagerEvent,
++  instanceId: ProviderInstanceId,
++  provider: ProviderDriverKind,
++  providerName: string,
++): ReadonlyArray<ProviderRuntimeEvent> {
++  if (event.kind === "rpc-event")
++    return mapAgentRpcEvent({
++      provider,
++      threadId: event.threadId,
++      ...(event.turnId ? { turnId: event.turnId } : {}),
++      event: event.payload,
++    }).map((mapped) => ({ ...mapped, providerInstanceId: instanceId }));
++  if (event.kind === "stderr")
++    return [
++      {
++        type: "runtime.warning",
++        ...base(provider, event.threadId, instanceId, event.turnId),
++        payload: { message: event.line || `${providerName} RPC stderr output` },
++      } as ProviderRuntimeEvent,
++    ];
++  if (event.kind === "stdout-parse-error")
++    return [
++      {
++        type: "runtime.warning",
++        ...base(provider, event.threadId, instanceId),
++        payload: {
++          message: `${providerName} RPC emitted malformed JSON.`,
++          detail: { line: event.line },
++        },
++      } as ProviderRuntimeEvent,
++    ];
++  return [
++    {
++      type: event.expected ? "session.exited" : "runtime.error",
++      ...base(provider, event.threadId, instanceId, event.turnId),
++      payload: event.expected
++        ? { reason: `${providerName} session stopped`, recoverable: true, exitKind: "graceful" }
++        : {
++            message: `${providerName} RPC process exited unexpectedly (${event.code ?? "signal"}${event.signal ? `:${event.signal}` : ""}).`,
++            class: "transport_error",
++          },
++    } as ProviderRuntimeEvent,
++  ];
++}
++
++export interface PiAdapterOptions {
++  readonly instanceId: ProviderInstanceId;
++  readonly binaryPath: string;
++  readonly agentDir?: string;
++  readonly environment?: NodeJS.ProcessEnv;
++  readonly provider?: ProviderDriverKind;
++  readonly providerName?: string;
++}
++
++export const makeAgentAdapter = (options: PiAdapterOptions) =>
++  Effect.gen(function* () {
++    const provider = options.provider ?? ProviderDriverKind.make("pi");
++    const providerName = options.providerName ?? provider;
++    const fileSystem = yield* FileSystem.FileSystem;
++    const serverConfig = yield* ServerConfig;
++    const manager = yield* Effect.acquireRelease(
++      Effect.sync(() => new PiRpcManager(options)),
++      (value) => Effect.promise(() => value.stopAll()).pipe(Effect.ignore),
++    );
++    const queue = yield* Queue.unbounded<ProviderRuntimeEvent>();
++    yield* Effect.acquireRelease(
++      Effect.sync(() =>
++        manager.subscribe((event) =>
++          Effect.runFork(
++            Queue.offerAll(
++              queue,
++              mapManagerEvent(event, options.instanceId, provider, providerName),
++            ),
++          ),
++        ),
++      ),
++      (unsubscribe) => Effect.sync(unsubscribe),
++    );
++
++    const selected = (input: ProviderSessionStartInput | ProviderSendTurnInput) =>
++      input.modelSelection?.instanceId === options.instanceId ? input.modelSelection : undefined;
++    const startSession: ProviderAdapterShape<ProviderAdapterError>["startSession"] = (input) =>
++      Effect.tryPromise({
++        try: () =>
++          manager.startSession({
++            threadId: input.threadId,
++            runtimeMode: input.runtimeMode,
++            ...(input.cwd ? { cwd: input.cwd } : {}),
++            ...(selected(input) ? { model: selected(input)!.model } : {}),
++            ...(selected(input) &&
++            getModelSelectionStringOptionValue(selected(input), "thinkingLevel")
++              ? {
++                  thinkingLevel: getModelSelectionStringOptionValue(
++                    selected(input),
++                    "thinkingLevel",
++                  ) as never,
++                }
++              : {}),
++            ...(input.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
++          }),
++        catch: (cause) =>
++          new ProviderAdapterProcessError({
++            provider,
++            threadId: input.threadId,
++            detail: errorMessage(cause, `Failed to start ${providerName} session.`),
++            cause,
++          }),
++      });
++    const sendTurn: ProviderAdapterShape<ProviderAdapterError>["sendTurn"] = (input) =>
++      Effect.gen(function* () {
++        const images = yield* Effect.forEach(input.attachments ?? [], (attachment) =>
++          Effect.gen(function* () {
++            const path = resolveAttachmentPath({
++              attachmentsDir: serverConfig.attachmentsDir,
++              attachment,
++            });
++            if (!path)
++              return yield* new ProviderAdapterValidationError({
++                provider,
++                operation: "sendTurn",
++                issue: `Invalid attachment '${attachment.id}'.`,
++              });
++            const bytes = yield* fileSystem.readFile(path).pipe(
++              Effect.mapError(
++                (cause) =>
++                  new ProviderAdapterRequestError({
++                    provider,
++                    method: "turn/prompt",
++                    detail: errorMessage(cause, "Unable to read image attachment."),
++                    cause,
++                  }),
++              ),
++            );
++            return {
++              type: "image" as const,
++              data: Buffer.from(bytes).toString("base64"),
++              mimeType: attachment.mimeType,
++            };
++          }),
++        );
++        const selection = selected(input);
++        return yield* Effect.tryPromise({
++          try: () =>
++            manager.sendTurn({
++              threadId: input.threadId,
++              ...(input.input !== undefined ? { input: input.input } : {}),
++              ...(selection ? { model: selection.model } : {}),
++              ...(selection && getModelSelectionStringOptionValue(selection, "thinkingLevel")
++                ? {
++                    thinkingLevel: getModelSelectionStringOptionValue(
++                      selection,
++                      "thinkingLevel",
++                    ) as never,
++                  }
++                : {}),
++              ...(images.length ? { images } : {}),
++            }),
++          catch: (cause) =>
++            new ProviderAdapterRequestError({
++              provider,
++              method: "turn/prompt",
++              detail: errorMessage(cause, `${providerName} prompt failed.`),
++              cause,
++            }),
++        });
++      });
++    const withRequestError = <A>(method: string, threadId: ThreadId, action: () => Promise<A>) =>
++      Effect.tryPromise({
++        try: action,
++        catch: (cause) =>
++          new ProviderAdapterRequestError({
++            provider,
++            method,
++            detail: errorMessage(cause, `${method} failed.`),
++            cause,
++          }),
++      });
++    return {
++      provider,
++      capabilities: { sessionModelSwitch: "in-session" },
++      startSession,
++      sendTurn,
++      interruptTurn: (threadId: ThreadId) =>
++        withRequestError("turn/abort", threadId, () => manager.interruptTurn(threadId)),
++      respondToRequest: (threadId: ThreadId) =>
++        Effect.fail(
++          new ProviderAdapterValidationError({
++            provider,
++            operation: "respondToRequest",
++            issue: `${providerName} does not expose approval requests for '${threadId}'.`,
++          }),
++        ),
++      respondToUserInput: (threadId: ThreadId) =>
++        Effect.fail(
++          new ProviderAdapterValidationError({
++            provider,
++            operation: "respondToUserInput",
++            issue: `${providerName} does not expose structured user input for '${threadId}'.`,
++          }),
++        ),
++      stopSession: (threadId: ThreadId) =>
++        withRequestError("session/stop", threadId, () => manager.stopSession(threadId)),
++      listSessions: () => Effect.sync(() => manager.listSessions()),
++      hasSession: (threadId: ThreadId) => Effect.sync(() => manager.hasSession(threadId)),
++      readThread: (threadId: ThreadId) =>
++        Effect.fail(new ProviderAdapterSessionNotFoundError({ provider, threadId })),
++      rollbackThread: (threadId: ThreadId) =>
++        Effect.fail(
++          new ProviderAdapterValidationError({
++            provider,
++            operation: "rollbackThread",
++            issue: `${providerName} does not expose rollback for '${threadId}'.`,
++          }),
++        ),
++      stopAll: () => Effect.promise(() => manager.stopAll()),
++      streamEvents: Stream.fromQueue(queue),
++    } satisfies ProviderAdapterShape<ProviderAdapterError>;
++  });
++
++export const makePiAdapter = (options: PiAdapterOptions) =>
++  makeAgentAdapter({ ...options, provider: ProviderDriverKind.make("pi"), providerName: "Pi" });
+diff --git a/apps/server/src/provider/builtInDrivers.test.ts b/apps/server/src/provider/builtInDrivers.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..353464aaa736ed1067f800266d4a4c56f3f0983f
+--- /dev/null
++++ b/apps/server/src/provider/builtInDrivers.test.ts
+@@ -0,0 +1,10 @@
++import { describe, expect, it } from "@effect/vitest";
++import { BUILT_IN_DRIVERS } from "./builtInDrivers.ts";
++
++describe("built-in provider drivers", () => {
++  it("registers Prime Agent as a selectable driver", () => {
++    const driver = BUILT_IN_DRIVERS.find((candidate) => candidate.driverKind === "primeAgent");
++    expect(driver?.metadata.displayName).toBe("Prime Agent");
++    expect(driver?.defaultConfig()).toMatchObject({ binaryPath: "prime-agent", agentDir: "" });
++  });
++});
+diff --git a/apps/server/src/provider/builtInDrivers.ts b/apps/server/src/provider/builtInDrivers.ts
+index 791a96e1da3c12201f85ff0a6a2e6ac8290ca1f1..87ac09480c7a08330f4d49d7798fd267e2a70787 100644
+--- a/apps/server/src/provider/builtInDrivers.ts
++++ b/apps/server/src/provider/builtInDrivers.ts
+@@ -25,6 +25,9 @@ import { CodexDriver, type CodexDriverEnv } from "./Drivers/CodexDriver.ts";
+ import { CursorDriver, type CursorDriverEnv } from "./Drivers/CursorDriver.ts";
+ import { GrokDriver, type GrokDriverEnv } from "./Drivers/GrokDriver.ts";
+ import { OpenCodeDriver, type OpenCodeDriverEnv } from "./Drivers/OpenCodeDriver.ts";
++import { PiDriver, type PiDriverEnv } from "./Drivers/PiDriver.ts";
++import { PrimeAgentDriver, type PrimeAgentDriverEnv } from "./Drivers/PrimeAgentDriver.ts";
++import { AntigravityDriver, type AntigravityDriverEnv } from "./Drivers/AntigravityDriver.ts";
+ import type { AnyProviderDriver } from "./ProviderDriver.ts";
+ 
+ /**
+@@ -37,7 +40,10 @@ export type BuiltInDriversEnv =
+   | CodexDriverEnv
+   | CursorDriverEnv
+   | GrokDriverEnv
+-  | OpenCodeDriverEnv;
++  | OpenCodeDriverEnv
++  | PiDriverEnv
++  | PrimeAgentDriverEnv
++  | AntigravityDriverEnv;
+ 
+ /**
+  * Ordered list of built-in drivers. Order matters only for tie-breaking in
+@@ -50,4 +56,7 @@ export const BUILT_IN_DRIVERS: ReadonlyArray<AnyProviderDriver<BuiltInDriversEnv
+   CursorDriver,
+   GrokDriver,
+   OpenCodeDriver,
++  PiDriver,
++  PrimeAgentDriver,
++  AntigravityDriver,
+ ];
+diff --git a/apps/server/src/provider/piRpcManager.test.ts b/apps/server/src/provider/piRpcManager.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..979971d6de3d7e4701c2087b809f1cdc80a22a29
+--- /dev/null
++++ b/apps/server/src/provider/piRpcManager.test.ts
+@@ -0,0 +1,121 @@
++import { describe, expect, it } from "vite-plus/test";
++import { ThreadId } from "@t3tools/contracts";
++import {
++  decodePiUtf8Chunks,
++  buildPiRpcArgs,
++  buildPiPromptCommand,
++  deletePiSessionIfCurrent,
++  mapPiAvailableModels,
++  PiRpcManager,
++  piModelCapabilities,
++  piRpcRequestTimeoutMs,
++} from "./piRpcManager.ts";
++
++describe("PiRpcManager lifecycle", () => {
++  it("allows startup configuration longer than normal prompt requests", () => {
++    expect(piRpcRequestTimeoutMs("prompt")).toBe(15_000);
++    expect(piRpcRequestTimeoutMs("set_model")).toBeGreaterThan(piRpcRequestTimeoutMs("prompt"));
++  });
++
++  it("uses offline startup for model discovery without changing interactive sessions", () => {
++    expect(buildPiRpcArgs({ offline: true })).toEqual([
++      "--offline",
++      "--mode",
++      "rpc",
++      "--no-extensions",
++    ]);
++    expect(buildPiRpcArgs({ agentDir: "/tmp/pi-sessions" })).toEqual([
++      "--mode",
++      "rpc",
++      "--no-extensions",
++      "--session-dir",
++      "/tmp/pi-sessions",
++    ]);
++  });
++
++  it("removes a session when the configured binary cannot start", async () => {
++    const manager = new PiRpcManager({ binaryPath: "/definitely/missing/pi" });
++    const threadId = ThreadId.make("pi-cleanup-test");
++
++    await expect(manager.startSession({ threadId, runtimeMode: "full-access" })).rejects.toThrow();
++    expect(manager.hasSession(threadId)).toBe(false);
++    await manager.stopAll();
++  });
++
++  it("rejects unsupported runtime modes before spawning Pi", async () => {
++    const manager = new PiRpcManager({ binaryPath: "/definitely/missing/pi" });
++    await expect(
++      manager.startSession({
++        threadId: ThreadId.make("pi-runtime-mode-test"),
++        runtimeMode: "approval-required",
++      }),
++    ).rejects.toThrow("Pi supports only full-access runtime mode.");
++  });
++
++  it("does not advertise thinking levels until Pi reports actual support", () => {
++    expect(piModelCapabilities().optionDescriptors).toEqual([]);
++    expect(mapPiAvailableModels([])).toEqual([]);
++  });
++
++  it("uses steering only for an already accepted running turn", () => {
++    expect(buildPiPromptCommand({ message: "first", steering: false })).toEqual({
++      type: "prompt",
++      message: "first",
++    });
++    expect(buildPiPromptCommand({ message: "follow-up", steering: true })).toEqual({
++      type: "prompt",
++      message: "follow-up",
++      streamingBehavior: "steer",
++    });
++  });
++
++  it("only advertises the levels returned by Pi", () => {
++    const descriptor = piModelCapabilities(["off", "high"]).optionDescriptors?.[0];
++    expect(descriptor).toMatchObject({ type: "select", id: "thinkingLevel" });
++    if (descriptor?.type !== "select") throw new Error("Expected a select descriptor.");
++    expect(descriptor.options.map((option) => option.id)).toEqual(["off", "high"]);
++  });
++
++  it("disambiguates duplicate model names by upstream provider", () => {
++    expect(
++      mapPiAvailableModels([
++        {
++          provider: "openai-codex",
++          modelId: "gpt-5.6-luna",
++          name: "GPT 5.6 Luna",
++          reasoning: true,
++          thinkingLevelMap: { xhigh: "xhigh", minimal: null, max: "max" },
++        },
++        {
++          provider: "prime-inference",
++          modelId: "openai/gpt-5.6-luna",
++          name: "GPT 5.6 Luna",
++          reasoning: true,
++          thinkingLevelMap: { xhigh: "xhigh", minimal: null, max: "max" },
++        },
++      ]).map((model) => ({ name: model.name, subProvider: model.subProvider })),
++    ).toEqual([
++      { name: "GPT 5.6 Luna (OpenAI Codex)", subProvider: "OpenAI Codex" },
++      { name: "GPT 5.6 Luna (Prime Inference)", subProvider: "Prime Inference" },
++    ]);
++  });
++
++  it("preserves split UTF-8 code points across stream chunks", () => {
++    const bytes = Buffer.from("Pi ✓ café", "utf8");
++    expect(
++      decodePiUtf8Chunks([bytes.subarray(0, 5), bytes.subarray(5, 8), bytes.subarray(8)]),
++    ).toBe("Pi ✓ café");
++  });
++
++  it("does not let a stale process exit delete its replacement session", () => {
++    const threadId = ThreadId.make("pi-replacement-test");
++    const sessions = new Map<ThreadId, object>();
++    const oldSession = {};
++    const replacement = {};
++    sessions.set(threadId, replacement);
++    expect(deletePiSessionIfCurrent(sessions, threadId, oldSession)).toBe(false);
++    expect(sessions.get(threadId)).toBe(replacement);
++    expect(deletePiSessionIfCurrent(sessions, threadId, replacement)).toBe(true);
++    expect(sessions.has(threadId)).toBe(false);
++  });
++});
+diff --git a/apps/server/src/provider/piRpcManager.ts b/apps/server/src/provider/piRpcManager.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..ad1da94c42200ccb3d9b455b93a5325aabcb3032
+--- /dev/null
++++ b/apps/server/src/provider/piRpcManager.ts
+@@ -0,0 +1,724 @@
++// @effect-diagnostics nodeBuiltinImport:off globalDate:off globalTimers:off
++import * as NodeCrypto from "node:crypto";
++import * as NodeChildProcess from "node:child_process";
++import * as NodeStringDecoder from "node:string_decoder";
++import {
++  ProviderDriverKind,
++  ThreadId,
++  TurnId,
++  type PiThinkingLevel,
++  type ModelCapabilities,
++  type ProviderSession,
++  type ProviderTurnStartResult,
++  type RuntimeMode,
++  type ServerProviderModel,
++} from "@t3tools/contracts";
++import { createModelCapabilities } from "@t3tools/shared/model";
++import {
++  parsePiModel,
++  parsePiRpcLine,
++  parsePiThinkingLevel,
++  piThinkingLevelsFromModel,
++  type PiRpcRecord,
++} from "./piRpcProtocol.ts";
++
++function thinkingLevelLabel(level: PiThinkingLevel): string {
++  return level === "xhigh" ? "Extra high" : level.charAt(0).toUpperCase() + level.slice(1);
++}
++
++export function piModelCapabilities(
++  levels: ReadonlyArray<PiThinkingLevel> = [],
++): ModelCapabilities {
++  return createModelCapabilities({
++    optionDescriptors: levels.length
++      ? [
++          {
++            id: "thinkingLevel",
++            label: "Thinking",
++            type: "select",
++            options: levels.map((level) => ({
++              id: level,
++              label: thinkingLevelLabel(level),
++            })),
++          },
++        ]
++      : [],
++  });
++}
++
++export function mapPiAvailableModels(
++  models: ReadonlyArray<unknown>,
++): ReadonlyArray<ServerProviderModel> {
++  const seen = new Set<string>();
++  const parsedModels = models.flatMap((model) => {
++    const slug = parsePiModel(model);
++    if (!slug || seen.has(slug)) return [];
++    seen.add(slug);
++    const record = model && typeof model === "object" ? (model as PiRpcRecord) : {};
++    const provider = stringValue(record.provider);
++    return [
++      {
++        slug,
++        name: stringValue(record.name) ?? slug,
++        ...(provider ? { provider } : {}),
++        isCustom: false,
++        capabilities: piModelCapabilities(piThinkingLevelsFromModel(record)),
++      },
++    ];
++  });
++
++  const nameCounts = new Map<string, number>();
++  for (const model of parsedModels) {
++    nameCounts.set(model.name, (nameCounts.get(model.name) ?? 0) + 1);
++  }
++
++  return parsedModels.map(({ provider, ...model }) => {
++    const subProvider = provider ? formatProviderName(provider) : undefined;
++    const name =
++      subProvider && (nameCounts.get(model.name) ?? 0) > 1
++        ? `${model.name} (${subProvider})`
++        : model.name;
++    return {
++      ...model,
++      name,
++      ...(subProvider ? { subProvider } : {}),
++    };
++  });
++}
++
++function formatProviderName(provider: string): string {
++  if (provider === "openai-codex") return "OpenAI Codex";
++  if (provider === "prime-inference") return "Prime Inference";
++  return provider.replace(/[-_]+/g, " ").replace(/\b\w/g, (character) => character.toUpperCase());
++}
++
++export type PiRpcManagerEvent =
++  | {
++      readonly kind: "rpc-event";
++      readonly threadId: ThreadId;
++      readonly turnId?: TurnId;
++      readonly model?: string;
++      readonly payload: PiRpcRecord;
++    }
++  | {
++      readonly kind: "stderr";
++      readonly threadId: ThreadId;
++      readonly turnId?: TurnId;
++      readonly line: string;
++    }
++  | { readonly kind: "stdout-parse-error"; readonly threadId: ThreadId; readonly line: string }
++  | {
++      readonly kind: "exit";
++      readonly threadId: ThreadId;
++      readonly turnId?: TurnId;
++      readonly code: number | null;
++      readonly signal: NodeJS.Signals | null;
++      readonly expected: boolean;
++    };
++
++export interface PiRpcManagerOptions {
++  readonly binaryPath: string;
++  readonly agentDir?: string;
++  readonly environment?: NodeJS.ProcessEnv;
++  readonly provider?: ProviderDriverKind;
++  readonly providerName?: string;
++}
++
++interface PendingRequest {
++  readonly command: string;
++  readonly resolve: (response: PiRpcRecord) => void;
++  readonly reject: (error: Error) => void;
++  readonly timeout: ReturnType<typeof setTimeout>;
++}
++
++interface SessionState {
++  readonly child: NodeChildProcess.ChildProcessWithoutNullStreams;
++  readonly threadId: ThreadId;
++  readonly cwd: string | undefined;
++  readonly runtimeMode: RuntimeMode;
++  readonly pending: Map<string, PendingRequest>;
++  readonly createdAt: string;
++  readonly listeners: { stdout: (chunk: Buffer) => void; stderr: (chunk: Buffer) => void };
++  readonly decoders: {
++    stdout: NodeStringDecoder.StringDecoder;
++    stderr: NodeStringDecoder.StringDecoder;
++  };
++  model: string | undefined;
++  thinkingLevel: PiThinkingLevel | undefined;
++  thinkingLevels: ReadonlyArray<PiThinkingLevel>;
++  sessionFile: string | undefined;
++  sessionId: string | undefined;
++  turnId: TurnId | undefined;
++  promptPending: boolean;
++  status: ProviderSession["status"];
++  stopping: boolean;
++  stdoutBuffer: string;
++  stderrBuffer: string;
++  assistantMessageSequence: number;
++  activeAssistantSequence: number | undefined;
++  assistantStopReason: string | undefined;
++  assistantErrorMessage: string | undefined;
++  terminalTurnId: TurnId | undefined;
++}
++
++function stringValue(value: unknown): string | undefined {
++  return typeof value === "string" && value.trim() ? value.trim() : undefined;
++}
++
++const PI_NORMAL_REQUEST_TIMEOUT_MS = 15_000;
++const PI_STARTUP_REQUEST_TIMEOUT_MS = 60_000;
++const PI_STARTUP_COMMANDS = new Set([
++  "get_available_models",
++  "get_state",
++  "set_model",
++  "set_thinking_level",
++  "switch_session",
++]);
++
++export function piRpcRequestTimeoutMs(commandType: string | undefined): number {
++  return commandType && PI_STARTUP_COMMANDS.has(commandType)
++    ? PI_STARTUP_REQUEST_TIMEOUT_MS
++    : PI_NORMAL_REQUEST_TIMEOUT_MS;
++}
++
++export function buildPiRpcArgs(input: {
++  readonly offline?: boolean;
++  readonly agentDir?: string;
++}): ReadonlyArray<string> {
++  const args = input.offline ? ["--offline"] : [];
++  args.push("--mode", "rpc", "--no-extensions");
++  if (input.agentDir) args.push("--session-dir", input.agentDir);
++  return args;
++}
++
++export function decodePiUtf8Chunks(chunks: ReadonlyArray<Buffer>): string {
++  const decoder = new NodeStringDecoder.StringDecoder("utf8");
++  return chunks.map((chunk) => decoder.write(chunk)).join("") + decoder.end();
++}
++
++export function deletePiSessionIfCurrent(
++  sessions: Map<ThreadId, unknown>,
++  threadId: ThreadId,
++  session: unknown,
++): boolean {
++  if (sessions.get(threadId) !== session) return false;
++  sessions.delete(threadId);
++  return true;
++}
++
++export function buildPiPromptCommand(input: {
++  readonly message: string;
++  readonly steering: boolean;
++  readonly images?: ReadonlyArray<unknown>;
++}): PiRpcRecord {
++  return {
++    type: "prompt",
++    message: input.message,
++    ...(input.steering ? { streamingBehavior: "steer" } : {}),
++    ...(input.images?.length ? { images: input.images } : {}),
++  };
++}
++
++function modelFromState(value: unknown): string | undefined {
++  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
++  const record = value as PiRpcRecord;
++  return parsePiModel(record);
++}
++
++function commandError(providerName: string, command: string, response: PiRpcRecord): Error {
++  return new Error(
++    stringValue(response.error) ?? `${providerName} RPC command '${command}' failed.`,
++  );
++}
++
++export class PiRpcManager {
++  private readonly sessions = new Map<ThreadId, SessionState>();
++  private readonly listeners = new Set<(event: PiRpcManagerEvent) => void>();
++
++  private readonly options: PiRpcManagerOptions;
++
++  constructor(options: PiRpcManagerOptions) {
++    this.options = options;
++  }
++
++  private provider(): ProviderDriverKind {
++    return this.options.provider ?? ProviderDriverKind.make("pi");
++  }
++
++  private providerName(): string {
++    return (
++      this.options.providerName ??
++      (this.provider() === ProviderDriverKind.make("pi") ? "Pi" : this.provider())
++    );
++  }
++
++  subscribe(listener: (event: PiRpcManagerEvent) => void): () => void {
++    this.listeners.add(listener);
++    return () => this.listeners.delete(listener);
++  }
++
++  private emit(event: PiRpcManagerEvent): void {
++    for (const listener of this.listeners) listener(event);
++  }
++
++  private failPending(session: SessionState, error: Error): void {
++    for (const pending of session.pending.values()) {
++      clearTimeout(pending.timeout);
++      pending.reject(error);
++    }
++    session.pending.clear();
++  }
++
++  private processLine(session: SessionState, line: string): void {
++    const parsed = parsePiRpcLine(line);
++    if (!parsed) {
++      if (line.trim()) this.emit({ kind: "stdout-parse-error", threadId: session.threadId, line });
++      return;
++    }
++    if (parsed.type === "response") {
++      const id = stringValue(parsed.id);
++      if (!id) return;
++      const pending = session.pending.get(id);
++      if (!pending) return;
++      clearTimeout(pending.timeout);
++      session.pending.delete(id);
++      if (parsed.success === true) pending.resolve(parsed);
++      else pending.reject(commandError(this.providerName(), pending.command, parsed));
++      return;
++    }
++    if (parsed.type === "extension_ui_request") {
++      this.emit({
++        kind: "rpc-event",
++        threadId: session.threadId,
++        ...(session.turnId ? { turnId: session.turnId } : {}),
++        payload: {
++          type: "extension_ui_request",
++          errorMessage: `${this.providerName()} requested extension UI input, which T3 Code cannot answer; the session was terminated.`,
++        },
++      });
++      if (this.sessions.get(session.threadId) === session) this.sessions.delete(session.threadId);
++      void this.stopSessionState(session);
++      return;
++    }
++    const eventTurnId = session.turnId;
++    const eventMessage = parsed.message as PiRpcRecord | undefined;
++    const isAssistantMessage = eventMessage?.role === "assistant";
++    if (parsed.type === "message_start" && isAssistantMessage)
++      session.activeAssistantSequence = session.assistantMessageSequence++;
++    // Pi puts streaming deltas in `assistantMessageEvent`, not `message`.
++    // Carry the active message identity across those events so text and
++    // thinking deltas remain attached to the same assistant segment.
++    const assistantSequence =
++      isAssistantMessage || parsed.type === "message_update"
++        ? (session.activeAssistantSequence ??= session.assistantMessageSequence++)
++        : undefined;
++    const event =
++      assistantSequence === undefined
++        ? parsed
++        : {
++            ...parsed,
++            piAssistantSequence: assistantSequence,
++            ...(eventMessage
++              ? { message: { ...eventMessage, piAssistantSequence: assistantSequence } }
++              : {}),
++          };
++    if (event.type === "turn_start") {
++      session.status = "running";
++      session.terminalTurnId = undefined;
++      session.assistantStopReason = undefined;
++      session.assistantErrorMessage = undefined;
++    }
++    if (event.type === "message_update") {
++      const update = event.assistantMessageEvent as PiRpcRecord | undefined;
++      const reason = stringValue(update?.reason);
++      if (reason === "error" || reason === "aborted") {
++        session.assistantStopReason = reason;
++        session.assistantErrorMessage = stringValue(update?.errorMessage);
++      }
++    }
++    if (event.type === "message_end") {
++      const message = event.message as PiRpcRecord | undefined;
++      if (message?.role === "assistant") {
++        session.assistantStopReason =
++          stringValue(message.stopReason) ?? session.assistantStopReason;
++        session.assistantErrorMessage =
++          stringValue(message.errorMessage) ?? session.assistantErrorMessage;
++      }
++      if (message?.role === "assistant") session.activeAssistantSequence = undefined;
++    }
++    if (event.type === "agent_settled") {
++      if (session.terminalTurnId === eventTurnId) return;
++      session.status = "ready";
++      session.terminalTurnId = eventTurnId;
++      session.turnId = undefined;
++    }
++    this.emit({
++      kind: "rpc-event",
++      threadId: session.threadId,
++      ...(eventTurnId ? { turnId: eventTurnId } : {}),
++      ...(session.model ? { model: session.model } : {}),
++      payload:
++        event.type === "agent_settled"
++          ? {
++              ...event,
++              ...(session.assistantStopReason ? { stopReason: session.assistantStopReason } : {}),
++              ...(session.assistantErrorMessage
++                ? { errorMessage: session.assistantErrorMessage }
++                : {}),
++            }
++          : event,
++    });
++  }
++
++  private consume(stream: "stdout" | "stderr", session: SessionState, chunk: Buffer): void {
++    const key = stream === "stdout" ? "stdoutBuffer" : "stderrBuffer";
++    session[key] += session.decoders[stream].write(chunk);
++    const lines = session[key].split("\n");
++    session[key] = lines.pop() ?? "";
++    for (const line of lines) {
++      if (stream === "stdout") this.processLine(session, line);
++      else if (line.trim())
++        this.emit({
++          kind: "stderr",
++          threadId: session.threadId,
++          ...(session.turnId ? { turnId: session.turnId } : {}),
++          line: line.endsWith("\r") ? line.slice(0, -1) : line,
++        });
++    }
++  }
++
++  private createSession(
++    threadId: ThreadId,
++    cwd: string | undefined,
++    runtimeMode: RuntimeMode,
++    options?: { readonly offline?: boolean },
++  ): SessionState {
++    // T3 Code has no provider extension-UI bridge. Disable extension discovery so
++    // installed extensions cannot block an otherwise healthy RPC session.
++    const args = buildPiRpcArgs({
++      ...(options?.offline ? { offline: true } : {}),
++      ...(this.options.agentDir ? { agentDir: this.options.agentDir } : {}),
++    });
++    const child = NodeChildProcess.spawn(this.options.binaryPath, args, {
++      cwd,
++      env: { ...process.env, ...this.options.environment },
++      stdio: "pipe",
++    });
++    const session: SessionState = {
++      child,
++      threadId,
++      cwd,
++      runtimeMode,
++      pending: new Map(),
++      createdAt: new Date().toISOString(),
++      listeners: { stdout: () => undefined, stderr: () => undefined },
++      decoders: {
++        stdout: new NodeStringDecoder.StringDecoder("utf8"),
++        stderr: new NodeStringDecoder.StringDecoder("utf8"),
++      },
++      model: undefined,
++      thinkingLevel: undefined,
++      thinkingLevels: [],
++      sessionFile: undefined,
++      sessionId: undefined,
++      turnId: undefined,
++      promptPending: false,
++      status: "connecting",
++      stopping: false,
++      stdoutBuffer: "",
++      stderrBuffer: "",
++      assistantMessageSequence: 0,
++      activeAssistantSequence: undefined,
++      assistantStopReason: undefined,
++      assistantErrorMessage: undefined,
++      terminalTurnId: undefined,
++    };
++    session.listeners.stdout = (chunk) => this.consume("stdout", session, chunk);
++    session.listeners.stderr = (chunk) => this.consume("stderr", session, chunk);
++    child.stdout.on("data", session.listeners.stdout);
++    child.stderr.on("data", session.listeners.stderr);
++    child.on("error", (error) => {
++      session.status = "error";
++      this.failPending(session, error instanceof Error ? error : new Error(String(error)));
++      this.emit({
++        kind: "exit",
++        threadId,
++        ...(session.turnId ? { turnId: session.turnId } : {}),
++        code: null,
++        signal: null,
++        expected: false,
++      });
++    });
++    child.on("exit", (code, signal) => {
++      session.status = session.stopping ? "closed" : code === 0 ? "closed" : "error";
++      this.failPending(
++        session,
++        new Error(
++          `${this.providerName()} RPC process exited (${code ?? "signal"}${signal ? `:${signal}` : ""}).`,
++        ),
++      );
++      this.emit({
++        kind: "exit",
++        threadId,
++        ...(session.turnId ? { turnId: session.turnId } : {}),
++        code,
++        signal,
++        expected: session.stopping,
++      });
++      deletePiSessionIfCurrent(this.sessions, threadId, session);
++    });
++    return session;
++  }
++
++  private request(
++    session: SessionState,
++    command: PiRpcRecord,
++    timeoutMs = piRpcRequestTimeoutMs(stringValue(command.type)),
++  ): Promise<PiRpcRecord> {
++    if (session.child.stdin.destroyed)
++      return Promise.reject(new Error(`${this.providerName()} RPC stdin is closed.`));
++    const id = stringValue(command.id) ?? NodeCrypto.randomUUID();
++    const payload = JSON.stringify({ ...command, id });
++    return new Promise((resolve, reject) => {
++      const timeout = setTimeout(() => {
++        session.pending.delete(id);
++        const error = new Error(
++          `${this.providerName()} RPC command '${String(command.type)}' timed out.`,
++        );
++        reject(error);
++        if (command.type === "prompt") void this.handlePromptTimeout(session, error);
++      }, timeoutMs);
++      session.pending.set(id, { command: String(command.type), resolve, reject, timeout });
++      session.child.stdin.write(`${payload}\n`, (error) => {
++        if (!error) return;
++        clearTimeout(timeout);
++        session.pending.delete(id);
++        reject(error);
++      });
++    });
++  }
++
++  private async stopSessionState(session: SessionState): Promise<void> {
++    session.stopping = true;
++    session.child.stdout.off("data", session.listeners.stdout);
++    session.child.stderr.off("data", session.listeners.stderr);
++    this.failPending(session, new Error(`${this.providerName()} session stopped.`));
++    if (session.child.exitCode === null && session.child.signalCode === null)
++      session.child.kill("SIGTERM");
++    await new Promise<void>((resolve) => {
++      if (session.child.exitCode !== null || session.child.signalCode !== null) return resolve();
++      const timer = setTimeout(() => {
++        if (session.child.exitCode === null && session.child.signalCode === null)
++          session.child.kill("SIGKILL");
++      }, 2_000);
++      session.child.once("exit", () => {
++        clearTimeout(timer);
++        resolve();
++      });
++    });
++  }
++
++  private async handlePromptTimeout(session: SessionState, error: Error): Promise<void> {
++    if (session.stopping || session.turnId === undefined) return;
++    const turnId = session.turnId;
++    session.status = "error";
++    session.terminalTurnId = turnId;
++    this.emit({
++      kind: "rpc-event",
++      threadId: session.threadId,
++      turnId,
++      ...(session.model ? { model: session.model } : {}),
++      payload: { type: "agent_settled", stopReason: "error", errorMessage: error.message },
++    });
++    session.turnId = undefined;
++    if (this.sessions.get(session.threadId) === session) this.sessions.delete(session.threadId);
++    await this.stopSessionState(session);
++  }
++
++  async startSession(input: {
++    readonly threadId: ThreadId;
++    readonly cwd?: string;
++    readonly runtimeMode: RuntimeMode;
++    readonly model?: string;
++    readonly thinkingLevel?: PiThinkingLevel;
++    readonly resumeCursor?: unknown;
++  }): Promise<ProviderSession> {
++    if (input.runtimeMode !== "full-access")
++      throw new Error(`${this.providerName()} supports only full-access runtime mode.`);
++    await this.stopSession(input.threadId);
++    const session = this.createSession(input.threadId, input.cwd, input.runtimeMode);
++    this.sessions.set(input.threadId, session);
++    try {
++      const resume =
++        input.resumeCursor && typeof input.resumeCursor === "object"
++          ? (input.resumeCursor as PiRpcRecord)
++          : undefined;
++      if (stringValue(resume?.sessionFile))
++        await this.request(session, { type: "switch_session", sessionPath: resume!.sessionFile });
++      if (input.model) await this.setModelState(session, input.model);
++      if (input.thinkingLevel) await this.setThinkingState(session, input.thinkingLevel);
++      const stateRecord = await this.readState(session);
++      session.status = stateRecord.isStreaming === true ? "running" : "ready";
++      return {
++        provider: this.provider(),
++        status: session.status,
++        runtimeMode: session.runtimeMode,
++        ...(session.cwd ? { cwd: session.cwd } : {}),
++        ...(session.model ? { model: session.model } : {}),
++        threadId: input.threadId,
++        resumeCursor: {
++          ...(session.sessionFile ? { sessionFile: session.sessionFile } : {}),
++          ...(session.sessionId ? { sessionId: session.sessionId } : {}),
++          ...(session.model ? { model: session.model } : {}),
++          ...(session.thinkingLevel ? { thinkingLevel: session.thinkingLevel } : {}),
++        },
++        createdAt: session.createdAt,
++        updatedAt: new Date().toISOString(),
++      };
++    } catch (error) {
++      await this.stopSessionState(session);
++      this.sessions.delete(input.threadId);
++      throw error;
++    }
++  }
++
++  private async setModelState(session: SessionState, model: string): Promise<void> {
++    const separator = model.indexOf("/");
++    if (separator <= 0 || separator === model.length - 1)
++      throw new Error(`Invalid ${this.providerName()} model '${model}'.`);
++    const response = await this.request(session, {
++      type: "set_model",
++      provider: model.slice(0, separator),
++      modelId: model.slice(separator + 1),
++    });
++    session.model = model;
++    session.thinkingLevels = piThinkingLevelsFromModel(response.data);
++  }
++
++  private async readState(session: SessionState): Promise<PiRpcRecord> {
++    const state = (await this.request(session, { type: "get_state" })).data;
++    const stateRecord = state && typeof state === "object" ? (state as PiRpcRecord) : {};
++    session.model = modelFromState(stateRecord.model) ?? session.model;
++    session.thinkingLevels = piThinkingLevelsFromModel(stateRecord.model);
++    session.thinkingLevel =
++      parsePiThinkingLevel(stateRecord.thinkingLevel) ?? session.thinkingLevel;
++    session.sessionFile = stringValue(stateRecord.sessionFile);
++    session.sessionId = stringValue(stateRecord.sessionId);
++    return stateRecord;
++  }
++
++  private async setThinkingState(session: SessionState, level: PiThinkingLevel): Promise<void> {
++    if (session.thinkingLevels.length && !session.thinkingLevels.includes(level))
++      throw new Error(`${this.providerName()} model does not support thinking level '${level}'.`);
++    await this.request(session, { type: "set_thinking_level", level });
++    await this.readState(session);
++  }
++
++  async sendTurn(input: {
++    readonly threadId: ThreadId;
++    readonly input?: string;
++    readonly model?: string;
++    readonly thinkingLevel?: PiThinkingLevel;
++    readonly images?: ReadonlyArray<{
++      readonly type: "image";
++      readonly data: string;
++      readonly mimeType: string;
++    }>;
++  }): Promise<ProviderTurnStartResult> {
++    const session = this.sessions.get(input.threadId);
++    if (!session) throw new Error(`Unknown ${this.providerName()} RPC thread '${input.threadId}'.`);
++    if (session.status === "error" || session.stopping)
++      throw new Error(
++        `${this.providerName()} session is not accepting turns after a failed request.`,
++      );
++    if (session.promptPending)
++      throw new Error(`${this.providerName()} prompt acceptance is still pending.`);
++    if (session.turnId && input.model && input.model !== session.model)
++      throw new Error(`${this.providerName()} cannot change models while a turn is running.`);
++    if (session.turnId && input.thinkingLevel && input.thinkingLevel !== session.thinkingLevel)
++      throw new Error(
++        `${this.providerName()} cannot change thinking levels while a turn is running.`,
++      );
++    if (!session.turnId && input.model && input.model !== session.model)
++      await this.setModelState(session, input.model);
++    if (!session.turnId && input.thinkingLevel && input.thinkingLevel !== session.thinkingLevel)
++      await this.setThinkingState(session, input.thinkingLevel);
++    const turnId = session.turnId ?? TurnId.make(NodeCrypto.randomUUID());
++    session.promptPending = true;
++    try {
++      await this.request(
++        session,
++        buildPiPromptCommand({
++          message: input.input ?? "",
++          steering: session.turnId !== undefined,
++          ...(input.images?.length ? { images: input.images } : {}),
++        }),
++      );
++    } finally {
++      session.promptPending = false;
++    }
++    session.turnId = turnId;
++    session.status = "running";
++    return {
++      threadId: input.threadId,
++      turnId,
++      resumeCursor: {
++        ...(session.model ? { model: session.model } : {}),
++        ...(session.thinkingLevel ? { thinkingLevel: session.thinkingLevel } : {}),
++        ...(session.sessionFile ? { sessionFile: session.sessionFile } : {}),
++      },
++    };
++  }
++
++  async interruptTurn(threadId: ThreadId): Promise<void> {
++    const session = this.sessions.get(threadId);
++    if (!session) throw new Error(`Unknown ${this.providerName()} RPC thread '${threadId}'.`);
++    await this.request(session, { type: "abort" });
++  }
++
++  async stopSession(threadId: ThreadId): Promise<void> {
++    const session = this.sessions.get(threadId);
++    if (!session) return;
++    this.sessions.delete(threadId);
++    await this.stopSessionState(session);
++  }
++
++  async stopAll(): Promise<void> {
++    await Promise.all([...this.sessions.values()].map((session) => this.stopSessionState(session)));
++    this.sessions.clear();
++  }
++
++  listSessions(): ReadonlyArray<ProviderSession> {
++    return [...this.sessions.values()].map((session) => ({
++      provider: this.provider(),
++      status: session.status,
++      runtimeMode: session.runtimeMode,
++      ...(session.cwd ? { cwd: session.cwd } : {}),
++      ...(session.model ? { model: session.model } : {}),
++      threadId: session.threadId,
++      createdAt: session.createdAt,
++      updatedAt: new Date().toISOString(),
++    }));
++  }
++
++  hasSession(threadId: ThreadId): boolean {
++    return this.sessions.has(threadId);
++  }
++
++  async discoverModels(cwd?: string): Promise<ReadonlyArray<ServerProviderModel>> {
++    const threadId = ThreadId.make(NodeCrypto.randomUUID());
++    // Model discovery only needs Pi's local catalog. Offline mode prevents Pi
++    // from waiting on remote catalog/auth refreshes before it can answer RPC.
++    const session = this.createSession(threadId, cwd, "full-access", { offline: true });
++    try {
++      const response = await this.request(session, { type: "get_available_models" });
++      const data =
++        response.data && typeof response.data === "object" ? (response.data as PiRpcRecord) : {};
++      const models = Array.isArray(data.models) ? data.models : [];
++      await this.readState(session);
++      return mapPiAvailableModels(models);
++    } finally {
++      await this.stopSessionState(session);
++    }
++  }
++}
+diff --git a/apps/server/src/provider/piRpcProtocol.test.ts b/apps/server/src/provider/piRpcProtocol.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..86fedd07a03a2c330634cb5eeeff25df36adac32
+--- /dev/null
++++ b/apps/server/src/provider/piRpcProtocol.test.ts
+@@ -0,0 +1,199 @@
++import { describe, expect, it } from "vite-plus/test";
++import { ThreadId, TurnId } from "@t3tools/contracts";
++import {
++  mapPiRpcEvent,
++  mapAgentRpcEvent,
++  parsePiModel,
++  parsePiRpcLine,
++  parsePiThinkingLevel,
++  piThinkingLevelsFromModel,
++} from "./piRpcProtocol.ts";
++
++describe("Pi RPC protocol", () => {
++  it("accepts strict JSONL with optional CRLF and rejects malformed records", () => {
++    expect(parsePiRpcLine('{"type":"agent_start"}\r')).toEqual({ type: "agent_start" });
++    expect(parsePiRpcLine("not json")).toBeNull();
++    expect(parsePiRpcLine("\u2028")).toBeNull();
++  });
++
++  it("discovers only provider/model records and preserves Pi thinking vocabulary", () => {
++    expect(parsePiModel({ provider: "openai", modelId: "gpt-5" })).toBe("openai/gpt-5");
++    expect(parsePiModel({ provider: "openai" })).toBeUndefined();
++    expect(parsePiThinkingLevel("xhigh")).toBe("xhigh");
++    expect(parsePiThinkingLevel("ultrathink")).toBeUndefined();
++  });
++
++  it("maps Pi terminal stop reasons without duplicating successful completion", () => {
++    const threadId = ThreadId.make("pi-thread");
++    const turnId = TurnId.make("pi-turn");
++
++    expect(
++      mapPiRpcEvent({
++        threadId,
++        turnId,
++        event: { type: "agent_settled", stopReason: "error", errorMessage: "quota exceeded" },
++      })[0],
++    ).toMatchObject({
++      type: "turn.completed",
++      payload: { state: "failed", stopReason: "error", errorMessage: "quota exceeded" },
++    });
++    expect(
++      mapPiRpcEvent({
++        threadId,
++        turnId,
++        event: { type: "agent_settled", stopReason: "aborted", errorMessage: "user stopped" },
++      })[0],
++    ).toMatchObject({
++      type: "turn.completed",
++      payload: { state: "interrupted", stopReason: "aborted", errorMessage: "user stopped" },
++    });
++  });
++
++  it("maps the shared event protocol with the Prime Agent provider kind", () => {
++    const event = mapAgentRpcEvent({
++      provider: "primeAgent" as never,
++      threadId: ThreadId.make("prime-agent-thread"),
++      turnId: TurnId.make("prime-agent-turn"),
++      event: { type: "turn_start" },
++    })[0];
++    expect(event).toMatchObject({ type: "turn.started", provider: "primeAgent" });
++  });
++
++  it("uses Pi message identity to separate assistant segments", () => {
++    const threadId = ThreadId.make("pi-thread");
++    const turnId = TurnId.make("pi-turn");
++    const first = mapPiRpcEvent({
++      threadId,
++      turnId,
++      event: {
++        type: "message_end",
++        message: { id: "assistant-1", role: "assistant", content: [{ type: "text", text: "one" }] },
++      },
++    })[0];
++    const second = mapPiRpcEvent({
++      threadId,
++      turnId,
++      event: {
++        type: "message_end",
++        message: { id: "assistant-2", role: "assistant", content: [{ type: "text", text: "two" }] },
++      },
++    })[0];
++    expect(first?.itemId).not.toBe(second?.itemId);
++  });
++
++  it("separates text-tool-text assistant segments without message ids", () => {
++    const threadId = ThreadId.make("pi-thread");
++    const turnId = TurnId.make("pi-turn");
++    const first = mapPiRpcEvent({
++      threadId,
++      turnId,
++      event: {
++        type: "message_update",
++        piAssistantSequence: 1,
++        assistantMessageEvent: { type: "text_delta", delta: "one" },
++      },
++    })[0];
++    const second = mapPiRpcEvent({
++      threadId,
++      turnId,
++      event: {
++        type: "message_update",
++        piAssistantSequence: 2,
++        assistantMessageEvent: { type: "text_delta", delta: "two" },
++      },
++    })[0];
++    expect(first?.itemId).not.toBe(second?.itemId);
++  });
++
++  it("preserves text and thinking stream kinds for incremental deltas", () => {
++    const input = { threadId: ThreadId.make("pi-thread"), turnId: TurnId.make("pi-turn") };
++    expect(
++      mapPiRpcEvent({
++        ...input,
++        event: {
++          type: "message_update",
++          piAssistantSequence: 7,
++          assistantMessageEvent: { type: "text_delta", delta: "visible" },
++        },
++      })[0],
++    ).toMatchObject({
++      type: "content.delta",
++      itemId: "pi-assistant:pi-thread:pi-turn:7",
++      payload: { streamKind: "assistant_text", delta: "visible" },
++    });
++    expect(
++      mapPiRpcEvent({
++        ...input,
++        event: {
++          type: "message_update",
++          piAssistantSequence: 7,
++          assistantMessageEvent: { type: "thinking_delta", delta: "reasoning" },
++        },
++      })[0],
++    ).toMatchObject({
++      type: "content.delta",
++      itemId: "pi-assistant:pi-thread:pi-turn:7",
++      payload: { streamKind: "reasoning_text", delta: "reasoning" },
++    });
++  });
++
++  it("derives Pi thinking levels from model metadata", () => {
++    expect(
++      piThinkingLevelsFromModel({
++        reasoning: true,
++        thinkingLevelMap: { low: "low", medium: null, high: "high" },
++      }),
++    ).toEqual(["off", "minimal", "low", "high", "xhigh", "max"]);
++    expect(
++      piThinkingLevelsFromModel({
++        reasoning: true,
++        thinkingLevelMap: { xhigh: "xhigh", minimal: null, max: "max" },
++      }),
++    ).toEqual(["off", "low", "medium", "high", "xhigh", "max"]);
++    expect(piThinkingLevelsFromModel({ reasoning: true })).toEqual([
++      "off",
++      "minimal",
++      "low",
++      "medium",
++      "high",
++      "xhigh",
++      "max",
++    ]);
++    expect(piThinkingLevelsFromModel({ reasoning: false })).toEqual(["off"]);
++  });
++
++  it("suppresses empty assistant completions and maps tool stages", () => {
++    const threadId = ThreadId.make("pi-thread");
++    const turnId = TurnId.make("pi-turn");
++    expect(
++      mapPiRpcEvent({
++        threadId,
++        turnId,
++        event: { type: "message_end", message: { role: "assistant", content: [] } },
++      }),
++    ).toEqual([]);
++    expect(
++      mapPiRpcEvent({
++        threadId,
++        turnId,
++        event: { type: "tool_execution_start", toolCallId: "call-1", toolName: "bash" },
++      })[0]?.type,
++    ).toBe("item.started");
++    expect(
++      mapPiRpcEvent({
++        threadId,
++        turnId,
++        event: {
++          type: "tool_execution_end",
++          toolCallId: "call-1",
++          toolName: "bash",
++          isError: true,
++        },
++      })[0]?.type,
++    ).toBe("item.completed");
++    expect(mapPiRpcEvent({ threadId, turnId, event: { type: "agent_end" } })).toEqual([]);
++    expect(mapPiRpcEvent({ threadId, turnId, event: { type: "agent_settled" } })[0]?.type).toBe(
++      "turn.completed",
++    );
++  });
++});
+diff --git a/apps/server/src/provider/piRpcProtocol.ts b/apps/server/src/provider/piRpcProtocol.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..5e3a3490cd2a7ed014adcef0376ba174b156b91c
+--- /dev/null
++++ b/apps/server/src/provider/piRpcProtocol.ts
+@@ -0,0 +1,263 @@
++// @effect-diagnostics globalDate:off cryptoRandomUUID:off
++import {
++  EventId,
++  PI_THINKING_LEVEL_OPTIONS,
++  ProviderDriverKind,
++  RuntimeItemId,
++  type PiThinkingLevel,
++  type ProviderRuntimeEvent,
++  type ThreadId,
++  type TurnId,
++} from "@t3tools/contracts";
++
++export type PiRpcRecord = Readonly<Record<string, unknown>>;
++export type AgentRpcRecord = PiRpcRecord;
++
++export function parseAgentRpcLine(line: string): AgentRpcRecord | null {
++  const normalized = line.endsWith("\r") ? line.slice(0, -1) : line;
++  if (normalized.length === 0) return null;
++  try {
++    const value: unknown = JSON.parse(normalized);
++    return value !== null && typeof value === "object" && !Array.isArray(value)
++      ? (value as AgentRpcRecord)
++      : null;
++  } catch {
++    return null;
++  }
++}
++
++export function parsePiRpcLine(line: string): PiRpcRecord | null {
++  return parseAgentRpcLine(line);
++}
++
++export function parsePiModel(value: unknown): string | undefined {
++  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
++  const record = value as PiRpcRecord;
++  const provider = typeof record.provider === "string" ? record.provider.trim() : "";
++  const modelId =
++    typeof record.modelId === "string"
++      ? record.modelId.trim()
++      : typeof record.id === "string"
++        ? record.id.trim()
++        : "";
++  return provider && modelId ? `${provider}/${modelId}` : undefined;
++}
++export const parseAgentModel = parsePiModel;
++
++export function parsePiThinkingLevel(value: unknown): PiThinkingLevel | undefined {
++  switch (value) {
++    case "off":
++    case "minimal":
++    case "low":
++    case "medium":
++    case "high":
++    case "xhigh":
++    case "max":
++      return value;
++    default:
++      return undefined;
++  }
++}
++export const parseAgentThinkingLevel = parsePiThinkingLevel;
++
++function asRecord(value: unknown): PiRpcRecord | undefined {
++  return value !== null && typeof value === "object" && !Array.isArray(value)
++    ? (value as PiRpcRecord)
++    : undefined;
++}
++
++function asString(value: unknown): string | undefined {
++  return typeof value === "string" ? value : undefined;
++}
++
++function textFromMessage(value: unknown): string | undefined {
++  const record = asRecord(value);
++  const content = record?.content;
++  if (Array.isArray(content)) {
++    const text = content
++      .flatMap((part) => {
++        const item = asRecord(part);
++        return item?.type === "text" && typeof item.text === "string" ? [item.text] : [];
++      })
++      .join("")
++      .trim();
++    if (text) return text;
++  }
++  const direct = asString(record?.text)?.trim();
++  return direct || undefined;
++}
++
++function assistantItemId(
++  provider: ProviderDriverKind,
++  threadId: ThreadId,
++  turnId: TurnId | undefined,
++  message: PiRpcRecord,
++) {
++  const identity =
++    asString(message.id) ??
++    asString(message.messageId) ??
++    String(message.piAssistantSequence ?? "unknown");
++  return `${provider}-assistant:${threadId}:${turnId ?? "session"}:${identity}`;
++}
++
++export function piThinkingLevelsFromModel(value: unknown): ReadonlyArray<PiThinkingLevel> {
++  const model = asRecord(value);
++  const map = asRecord(model?.thinkingLevelMap);
++  if (model?.reasoning === false) return ["off"];
++  if (map || model?.reasoning === true) {
++    return PI_THINKING_LEVEL_OPTIONS.filter((level) => map?.[level] !== null);
++  }
++  return [];
++}
++export const agentThinkingLevelsFromModel = piThinkingLevelsFromModel;
++
++function base(provider: ProviderDriverKind, threadId: ThreadId, turnId?: TurnId, itemId?: string) {
++  return {
++    eventId: EventId.make(globalThis.crypto.randomUUID()),
++    provider,
++    threadId,
++    createdAt: new Date().toISOString(),
++    ...(turnId ? { turnId } : {}),
++    ...(itemId ? { itemId: RuntimeItemId.make(itemId) } : {}),
++  };
++}
++
++export function mapPiRpcEvent(input: {
++  readonly threadId: ThreadId;
++  readonly turnId?: TurnId;
++  readonly event: PiRpcRecord;
++}): ReadonlyArray<ProviderRuntimeEvent> {
++  return mapAgentRpcEvent({ ...input, provider: ProviderDriverKind.make("pi") });
++}
++
++export function mapAgentRpcEvent(input: {
++  readonly provider: ProviderDriverKind;
++  readonly threadId: ThreadId;
++  readonly turnId?: TurnId;
++  readonly event: AgentRpcRecord;
++}): ReadonlyArray<ProviderRuntimeEvent> {
++  const type = asString(input.event.type);
++  if (!type) return [];
++  const payload = input.event;
++  if (type === "message_update") {
++    const update = asRecord(payload.assistantMessageEvent);
++    const delta = asString(update?.delta);
++    if (!delta) return [];
++    const streamKind = update?.type === "thinking_delta" ? "reasoning_text" : "assistant_text";
++    if (update?.type !== "text_delta" && update?.type !== "thinking_delta") return [];
++    return [
++      {
++        type: "content.delta",
++        ...base(
++          input.provider,
++          input.threadId,
++          input.turnId,
++          assistantItemId(input.provider, input.threadId, input.turnId, payload),
++        ),
++        payload: { streamKind, delta },
++      } as unknown as ProviderRuntimeEvent,
++    ];
++  }
++  if (type === "message_end" && asString(asRecord(payload.message)?.role) === "assistant") {
++    const message = asRecord(payload.message) ?? {};
++    const text = textFromMessage(payload.message);
++    return text
++      ? [
++          {
++            type: "item.completed",
++            ...base(
++              input.provider,
++              input.threadId,
++              input.turnId,
++              assistantItemId(input.provider, input.threadId, input.turnId, message),
++            ),
++            payload: {
++              itemType: "assistant_message",
++              status: "completed",
++              title: "Assistant message",
++              detail: text,
++              data: payload.message,
++            },
++          } as unknown as ProviderRuntimeEvent,
++        ]
++      : [];
++  }
++  if (
++    type === "tool_execution_start" ||
++    type === "tool_execution_update" ||
++    type === "tool_execution_end"
++  ) {
++    const toolId = asString(payload.toolCallId) ?? asString(payload.toolName) ?? "unknown";
++    const status =
++      type === "tool_execution_end"
++        ? payload.isError === true
++          ? "failed"
++          : "completed"
++        : "inProgress";
++    return [
++      {
++        type:
++          type === "tool_execution_start"
++            ? "item.started"
++            : type === "tool_execution_end"
++              ? "item.completed"
++              : "item.updated",
++        ...base(input.provider, input.threadId, input.turnId, `${input.provider}-tool:${toolId}`),
++        payload: {
++          itemType: "dynamic_tool_call",
++          status,
++          title: asString(payload.toolName) ?? "Tool call",
++          data: payload,
++        },
++      } as unknown as ProviderRuntimeEvent,
++    ];
++  }
++  if (type === "turn_start") {
++    return [
++      {
++        type: "turn.started",
++        ...base(input.provider, input.threadId, input.turnId),
++        payload: {},
++      } as unknown as ProviderRuntimeEvent,
++    ];
++  }
++  if (type === "extension_ui_request") {
++    return [
++      {
++        type: "runtime.error",
++        ...base(input.provider, input.threadId, input.turnId),
++        payload: {
++          message:
++            asString(payload.errorMessage) ??
++            `${input.provider} requested extension UI input, which T3 Code cannot answer.`,
++          class: "provider_error",
++          detail: payload,
++        },
++      } as unknown as ProviderRuntimeEvent,
++    ];
++  }
++  if (type === "agent_settled") {
++    const stopReason = asString(payload.stopReason) ?? "stop";
++    const errorMessage = asString(payload.errorMessage);
++    const state =
++      stopReason === "error"
++        ? "failed"
++        : stopReason === "aborted"
++          ? "interrupted"
++          : stopReason === "cancelled"
++            ? "cancelled"
++            : "completed";
++    return [
++      {
++        type: "turn.completed",
++        ...base(input.provider, input.threadId, input.turnId),
++        payload: {
++          state,
++          stopReason,
++          ...(errorMessage ? { errorMessage } : {}),
++        },
++      } as unknown as ProviderRuntimeEvent,
++    ];
++  }
++  return [];
++}
+diff --git a/apps/server/src/textGeneration/TextGeneration.ts b/apps/server/src/textGeneration/TextGeneration.ts
+index 66b7ccd465f1eb7d6c1f9c3c4fed144e8d011999..f6b9bc74862bc11ed8a17afea50de43ea8059a63 100644
+--- a/apps/server/src/textGeneration/TextGeneration.ts
++++ b/apps/server/src/textGeneration/TextGeneration.ts
+@@ -8,7 +8,13 @@ import * as ProviderInstanceRegistry from "../provider/Services/ProviderInstance
+ import type { ProviderInstance } from "../provider/ProviderDriver.ts";
+ import type { TextGenerationPolicy } from "./TextGenerationPolicy.ts";
+ 
+-export type TextGenerationProvider = "codex" | "claudeAgent" | "cursor" | "grok" | "opencode";
++export type TextGenerationProvider =
++  | "codex"
++  | "claudeAgent"
++  | "cursor"
++  | "grok"
++  | "opencode"
++  | "pi";
+ 
+ export interface CommitMessageGenerationInput {
+   cwd: string;
+diff --git a/apps/web/index.html b/apps/web/index.html
+index f51d9432daef48c6cad82d598316e6302b41ca4c..d5360ba8a7c9c01ebb0e1f15991a21f1bb3e6ba8 100644
+--- a/apps/web/index.html
++++ b/apps/web/index.html
+@@ -120,6 +120,126 @@
+               chrome: "#1d1929",
+             },
+           },
++          "catppuccin-mocha": {
++            dark: {
++              background: "#1e1e2e",
++              foreground: "#cdd6f4",
++              accent: "#cba6f7",
++              chrome: "#1e1e2e",
++            },
++          },
++          dracula: {
++            dark: {
++              background: "#282a36",
++              foreground: "#f8f8f2",
++              accent: "#bd93f9",
++              chrome: "#282a36",
++            },
++          },
++          "one-dark-pro": {
++            dark: {
++              background: "#282c34",
++              foreground: "#abb2bf",
++              accent: "#61afef",
++              chrome: "#282c34",
++            },
++          },
++          "tokyo-night": {
++            dark: {
++              background: "#1a1b26",
++              foreground: "#c0caf5",
++              accent: "#7aa2f7",
++              chrome: "#1a1b26",
++            },
++          },
++          "gruvbox-dark": {
++            dark: {
++              background: "#282828",
++              foreground: "#ebdbb2",
++              accent: "#d79921",
++              chrome: "#282828",
++            },
++          },
++          nord: {
++            dark: {
++              background: "#2e3440",
++              foreground: "#d8dee9",
++              accent: "#88c0d0",
++              chrome: "#2e3440",
++            },
++          },
++          "github-dark": {
++            dark: {
++              background: "#0d1117",
++              foreground: "#c9d1d9",
++              accent: "#58a6ff",
++              chrome: "#0d1117",
++            },
++          },
++          "material-theme-palenight": {
++            dark: {
++              background: "#292d3e",
++              foreground: "#a6accd",
++              accent: "#c792ea",
++              chrome: "#292d3e",
++            },
++          },
++          "rose-pine": {
++            dark: {
++              background: "#191724",
++              foreground: "#e0def4",
++              accent: "#c4a7e7",
++              chrome: "#191724",
++            },
++          },
++          "kanagawa-dragon": {
++            dark: {
++              background: "#181616",
++              foreground: "#c5c9c5",
++              accent: "#c4b28a",
++              chrome: "#181616",
++            },
++          },
++          "everforest-dark": {
++            dark: {
++              background: "#2d353b",
++              foreground: "#d3c6aa",
++              accent: "#a7c080",
++              chrome: "#2d353b",
++            },
++          },
++          monokai: {
++            dark: {
++              background: "#272822",
++              foreground: "#f8f8f2",
++              accent: "#a6e22e",
++              chrome: "#272822",
++            },
++          },
++          "vitesse-dark": {
++            dark: {
++              background: "#121212",
++              foreground: "#dbd7ca",
++              accent: "#4d9375",
++              chrome: "#121212",
++            },
++          },
++          "solarized-dark": {
++            dark: {
++              background: "#002b36",
++              foreground: "#839496",
++              accent: "#268bd2",
++              chrome: "#002b36",
++            },
++          },
++          "synthwave-84": {
++            dark: {
++              background: "#262335",
++              foreground: "#f4f4f4",
++              accent: "#ff7edb",
++              chrome: "#262335",
++            },
++          },
+         };
+         // Keep the built-in mode list in sync with the runtime so the selected
+         // T3 Chat palette is visible before React has mounted.
+@@ -143,6 +263,21 @@
+           "t3-ocean",
+           "t3-ember",
+           "t3-iris",
++          "catppuccin-mocha",
++          "dracula",
++          "one-dark-pro",
++          "tokyo-night",
++          "gruvbox-dark",
++          "nord",
++          "github-dark",
++          "material-theme-palenight",
++          "rose-pine",
++          "kanagawa-dragon",
++          "everforest-dark",
++          "monokai",
++          "vitesse-dark",
++          "solarized-dark",
++          "synthwave-84",
+         ];
+         // Update every theme-color meta so any element another layer added
+         // carries the resolved color too.
+@@ -232,7 +367,11 @@
+             themeModes !== null;
+           const theme = isKnownTheme && storedTheme ? storedTheme : "system";
+           const isThemed = isKnownTheme && themeModes !== null;
+-          const baseAppearance = customTheme ? customTheme.appearance : "light";
++          const baseAppearance = customTheme
++            ? customTheme.appearance
++            : builtInModes?.length === 1
++              ? builtInModes[0]
++              : "light";
+           const systemMode = prefersDark ? "dark" : "light";
+           const storedAppearanceMode = window.localStorage.getItem(
+             THEME_APPEARANCE_MODE_STORAGE_KEY,
+diff --git a/apps/web/src/claudexThemes.css b/apps/web/src/claudexThemes.css
+new file mode 100644
+index 0000000000000000000000000000000000000000..d1199a8415aa05936d06ca477268f1408fe0857a
+--- /dev/null
++++ b/apps/web/src/claudexThemes.css
+@@ -0,0 +1,1025 @@
++/* Claudex palettes are explicit semantic-token overrides, so every existing
++ * surface follows the selected theme without a second, parallel component skin. */
++html.dark:root[data-theme-id="catppuccin-mocha"] {
++  color-scheme: dark;
++  --background: #1e1e2e;
++  --app-chrome-background: #1e1e2e;
++  --foreground: #cdd6f4;
++  --card: #181825;
++  --card-foreground: #cdd6f4;
++  --popover: #181825;
++  --popover-foreground: #cdd6f4;
++  --primary: #cba6f7;
++  --primary-foreground: #1e1e2e;
++  --secondary: #313244;
++  --secondary-foreground: #cdd6f4;
++  --muted: #313244;
++  --muted-foreground: #a6adc8;
++  --accent: #45475a;
++  --accent-foreground: #cdd6f4;
++  --destructive: #f38ba8;
++  --border: #45475a;
++  --input: #45475a;
++  --ring: #cba6f7;
++  --destructive-foreground: #f38ba8;
++  --info: #89b4fa;
++  --info-foreground: #89b4fa;
++  --success: #a6e3a1;
++  --success-foreground: #a6e3a1;
++  --warning: #f9e2af;
++  --warning-foreground: #f9e2af;
++}
++html.dark:root[data-theme-id="dracula"] {
++  color-scheme: dark;
++  --background: #282a36;
++  --app-chrome-background: #282a36;
++  --foreground: #f8f8f2;
++  --card: #21222c;
++  --card-foreground: #f8f8f2;
++  --popover: #21222c;
++  --popover-foreground: #f8f8f2;
++  --primary: #bd93f9;
++  --primary-foreground: #282a36;
++  --secondary: #44475a;
++  --secondary-foreground: #f8f8f2;
++  --muted: #44475a;
++  --muted-foreground: #6272a4;
++  --accent: #44475a;
++  --accent-foreground: #f8f8f2;
++  --destructive: #ff5555;
++  --border: #6272a4;
++  --input: #44475a;
++  --ring: #bd93f9;
++  --destructive-foreground: #ff5555;
++  --info: #8be9fd;
++  --info-foreground: #8be9fd;
++  --success: #50fa7b;
++  --success-foreground: #50fa7b;
++  --warning: #ffb86c;
++  --warning-foreground: #ffb86c;
++}
++html.dark:root[data-theme-id="one-dark-pro"] {
++  color-scheme: dark;
++  --background: #282c34;
++  --app-chrome-background: #282c34;
++  --foreground: #abb2bf;
++  --card: #21252b;
++  --card-foreground: #abb2bf;
++  --popover: #21252b;
++  --popover-foreground: #abb2bf;
++  --primary: #61afef;
++  --primary-foreground: #282c34;
++  --secondary: #3e4451;
++  --secondary-foreground: #abb2bf;
++  --muted: #3e4451;
++  --muted-foreground: #7f848e;
++  --accent: #3e4451;
++  --accent-foreground: #abb2bf;
++  --destructive: #e06c75;
++  --border: #3e4451;
++  --input: #3e4451;
++  --ring: #61afef;
++  --destructive-foreground: #e06c75;
++  --info: #56b6c2;
++  --info-foreground: #56b6c2;
++  --success: #98c379;
++  --success-foreground: #98c379;
++  --warning: #e5c07b;
++  --warning-foreground: #e5c07b;
++}
++html.dark:root[data-theme-id="tokyo-night"] {
++  color-scheme: dark;
++  --background: #1a1b26;
++  --app-chrome-background: #1a1b26;
++  --foreground: #c0caf5;
++  --card: #16161e;
++  --card-foreground: #c0caf5;
++  --popover: #16161e;
++  --popover-foreground: #c0caf5;
++  --primary: #7aa2f7;
++  --primary-foreground: #1a1b26;
++  --secondary: #292e42;
++  --secondary-foreground: #c0caf5;
++  --muted: #292e42;
++  --muted-foreground: #565f89;
++  --accent: #33467c;
++  --accent-foreground: #c0caf5;
++  --destructive: #f7768e;
++  --border: #292e42;
++  --input: #292e42;
++  --ring: #7aa2f7;
++  --destructive-foreground: #f7768e;
++  --info: #7dcfff;
++  --info-foreground: #7dcfff;
++  --success: #41a6b5;
++  --success-foreground: #41a6b5;
++  --warning: #e0af68;
++  --warning-foreground: #e0af68;
++}
++html.dark:root[data-theme-id="gruvbox-dark"] {
++  color-scheme: dark;
++  --background: #282828;
++  --app-chrome-background: #282828;
++  --foreground: #ebdbb2;
++  --card: #1d2021;
++  --card-foreground: #ebdbb2;
++  --popover: #1d2021;
++  --popover-foreground: #ebdbb2;
++  --primary: #d79921;
++  --primary-foreground: #282828;
++  --secondary: #3c3836;
++  --secondary-foreground: #ebdbb2;
++  --muted: #3c3836;
++  --muted-foreground: #a89984;
++  --accent: #504945;
++  --accent-foreground: #ebdbb2;
++  --destructive: #fb4934;
++  --border: #504945;
++  --input: #3c3836;
++  --ring: #d79921;
++  --destructive-foreground: #fb4934;
++  --info: #83a598;
++  --info-foreground: #83a598;
++  --success: #b8bb26;
++  --success-foreground: #b8bb26;
++  --warning: #fabd2f;
++  --warning-foreground: #fabd2f;
++}
++html.dark:root[data-theme-id="nord"] {
++  color-scheme: dark;
++  --background: #2e3440;
++  --app-chrome-background: #2e3440;
++  --foreground: #d8dee9;
++  --card: #3b4252;
++  --card-foreground: #d8dee9;
++  --popover: #3b4252;
++  --popover-foreground: #d8dee9;
++  --primary: #88c0d0;
++  --primary-foreground: #2e3440;
++  --secondary: #434c5e;
++  --secondary-foreground: #d8dee9;
++  --muted: #434c5e;
++  --muted-foreground: #81a1c1;
++  --accent: #4c566a;
++  --accent-foreground: #d8dee9;
++  --destructive: #bf616a;
++  --border: #4c566a;
++  --input: #434c5e;
++  --ring: #88c0d0;
++  --destructive-foreground: #bf616a;
++  --info: #81a1c1;
++  --info-foreground: #81a1c1;
++  --success: #a3be8c;
++  --success-foreground: #a3be8c;
++  --warning: #ebcb8b;
++  --warning-foreground: #ebcb8b;
++}
++html.dark:root[data-theme-id="github-dark"] {
++  color-scheme: dark;
++  --background: #0d1117;
++  --app-chrome-background: #0d1117;
++  --foreground: #c9d1d9;
++  --card: #161b22;
++  --card-foreground: #c9d1d9;
++  --popover: #161b22;
++  --popover-foreground: #c9d1d9;
++  --primary: #58a6ff;
++  --primary-foreground: #0d1117;
++  --secondary: #21262d;
++  --secondary-foreground: #c9d1d9;
++  --muted: #21262d;
++  --muted-foreground: #8b949e;
++  --accent: #30363d;
++  --accent-foreground: #c9d1d9;
++  --destructive: #f85149;
++  --border: #30363d;
++  --input: #21262d;
++  --ring: #58a6ff;
++  --destructive-foreground: #f85149;
++  --info: #79c0ff;
++  --info-foreground: #79c0ff;
++  --success: #3fb950;
++  --success-foreground: #3fb950;
++  --warning: #d29922;
++  --warning-foreground: #d29922;
++}
++html.dark:root[data-theme-id="material-theme-palenight"] {
++  color-scheme: dark;
++  --background: #292d3e;
++  --app-chrome-background: #292d3e;
++  --foreground: #a6accd;
++  --card: #1f2233;
++  --card-foreground: #a6accd;
++  --popover: #1f2233;
++  --popover-foreground: #a6accd;
++  --primary: #c792ea;
++  --primary-foreground: #292d3e;
++  --secondary: #3a3f58;
++  --secondary-foreground: #a6accd;
++  --muted: #3a3f58;
++  --muted-foreground: #676e95;
++  --accent: #434758;
++  --accent-foreground: #a6accd;
++  --destructive: #f07178;
++  --border: #434758;
++  --input: #3a3f58;
++  --ring: #c792ea;
++  --destructive-foreground: #f07178;
++  --info: #89ddff;
++  --info-foreground: #89ddff;
++  --success: #c3e88d;
++  --success-foreground: #c3e88d;
++  --warning: #ffcb6b;
++  --warning-foreground: #ffcb6b;
++}
++html.dark:root[data-theme-id="rose-pine"] {
++  color-scheme: dark;
++  --background: #191724;
++  --app-chrome-background: #191724;
++  --foreground: #e0def4;
++  --card: #1f1d2e;
++  --card-foreground: #e0def4;
++  --popover: #1f1d2e;
++  --popover-foreground: #e0def4;
++  --primary: #c4a7e7;
++  --primary-foreground: #191724;
++  --secondary: #26233a;
++  --secondary-foreground: #e0def4;
++  --muted: #26233a;
++  --muted-foreground: #908caa;
++  --accent: #403d52;
++  --accent-foreground: #e0def4;
++  --destructive: #eb6f92;
++  --border: #403d52;
++  --input: #26233a;
++  --ring: #c4a7e7;
++  --destructive-foreground: #eb6f92;
++  --info: #9ccfd8;
++  --info-foreground: #9ccfd8;
++  --success: #31748f;
++  --success-foreground: #31748f;
++  --warning: #f6c177;
++  --warning-foreground: #f6c177;
++}
++html.dark:root[data-theme-id="kanagawa-dragon"] {
++  color-scheme: dark;
++  --background: #181616;
++  --app-chrome-background: #181616;
++  --foreground: #c5c9c5;
++  --card: #1f1f1f;
++  --card-foreground: #c5c9c5;
++  --popover: #1f1f1f;
++  --popover-foreground: #c5c9c5;
++  --primary: #c4b28a;
++  --primary-foreground: #181616;
++  --secondary: #2a2a2a;
++  --secondary-foreground: #c5c9c5;
++  --muted: #2a2a2a;
++  --muted-foreground: #8a8a8a;
++  --accent: #3a3a3a;
++  --accent-foreground: #c5c9c5;
++  --destructive: #c4746e;
++  --border: #3a3a3a;
++  --input: #2a2a2a;
++  --ring: #c4b28a;
++  --destructive-foreground: #c4746e;
++  --info: #8ba4b0;
++  --info-foreground: #8ba4b0;
++  --success: #87a987;
++  --success-foreground: #87a987;
++  --warning: #c4b28a;
++  --warning-foreground: #c4b28a;
++}
++html.dark:root[data-theme-id="everforest-dark"] {
++  color-scheme: dark;
++  --background: #2d353b;
++  --app-chrome-background: #2d353b;
++  --foreground: #d3c6aa;
++  --card: #343f44;
++  --card-foreground: #d3c6aa;
++  --popover: #343f44;
++  --popover-foreground: #d3c6aa;
++  --primary: #a7c080;
++  --primary-foreground: #2d353b;
++  --secondary: #3d484d;
++  --secondary-foreground: #d3c6aa;
++  --muted: #3d484d;
++  --muted-foreground: #859289;
++  --accent: #475258;
++  --accent-foreground: #d3c6aa;
++  --destructive: #e67e80;
++  --border: #475258;
++  --input: #3d484d;
++  --ring: #a7c080;
++  --destructive-foreground: #e67e80;
++  --info: #7fbbb3;
++  --info-foreground: #7fbbb3;
++  --success: #a7c080;
++  --success-foreground: #a7c080;
++  --warning: #dbbc7f;
++  --warning-foreground: #dbbc7f;
++}
++html.dark:root[data-theme-id="monokai"] {
++  color-scheme: dark;
++  --background: #272822;
++  --app-chrome-background: #272822;
++  --foreground: #f8f8f2;
++  --card: #1e1f1c;
++  --card-foreground: #f8f8f2;
++  --popover: #1e1f1c;
++  --popover-foreground: #f8f8f2;
++  --primary: #a6e22e;
++  --primary-foreground: #272822;
++  --secondary: #3e3d32;
++  --secondary-foreground: #f8f8f2;
++  --muted: #3e3d32;
++  --muted-foreground: #a6a69c;
++  --accent: #49483e;
++  --accent-foreground: #f8f8f2;
++  --destructive: #f92672;
++  --border: #49483e;
++  --input: #3e3d32;
++  --ring: #a6e22e;
++  --destructive-foreground: #f92672;
++  --info: #66d9ef;
++  --info-foreground: #66d9ef;
++  --success: #a6e22e;
++  --success-foreground: #a6e22e;
++  --warning: #e6db74;
++  --warning-foreground: #e6db74;
++}
++html.dark:root[data-theme-id="vitesse-dark"] {
++  color-scheme: dark;
++  --background: #121212;
++  --app-chrome-background: #121212;
++  --foreground: #dbd7ca;
++  --card: #181818;
++  --card-foreground: #dbd7ca;
++  --popover: #181818;
++  --popover-foreground: #dbd7ca;
++  --primary: #4d9375;
++  --primary-foreground: #121212;
++  --secondary: #252525;
++  --secondary-foreground: #dbd7ca;
++  --muted: #252525;
++  --muted-foreground: #888;
++  --accent: #333;
++  --accent-foreground: #dbd7ca;
++  --destructive: #cb7676;
++  --border: #333;
++  --input: #252525;
++  --ring: #4d9375;
++  --destructive-foreground: #cb7676;
++  --info: #80a665;
++  --info-foreground: #80a665;
++  --success: #4d9375;
++  --success-foreground: #4d9375;
++  --warning: #bd976a;
++  --warning-foreground: #bd976a;
++}
++html.dark:root[data-theme-id="solarized-dark"] {
++  color-scheme: dark;
++  --background: #002b36;
++  --app-chrome-background: #002b36;
++  --foreground: #839496;
++  --card: #073642;
++  --card-foreground: #839496;
++  --popover: #073642;
++  --popover-foreground: #839496;
++  --primary: #268bd2;
++  --primary-foreground: #002b36;
++  --secondary: #073642;
++  --secondary-foreground: #839496;
++  --muted: #073642;
++  --muted-foreground: #657b83;
++  --accent: #0e4d5a;
++  --accent-foreground: #839496;
++  --destructive: #dc322f;
++  --border: #0e4d5a;
++  --input: #073642;
++  --ring: #268bd2;
++  --destructive-foreground: #dc322f;
++  --info: #2aa198;
++  --info-foreground: #2aa198;
++  --success: #859900;
++  --success-foreground: #859900;
++  --warning: #b58900;
++  --warning-foreground: #b58900;
++}
++html.dark:root[data-theme-id="synthwave-84"] {
++  color-scheme: dark;
++  --background: #262335;
++  --app-chrome-background: #262335;
++  --foreground: #f4f4f4;
++  --card: #2a2139;
++  --card-foreground: #f4f4f4;
++  --popover: #2a2139;
++  --popover-foreground: #f4f4f4;
++  --primary: #ff7edb;
++  --primary-foreground: #262335;
++  --secondary: #34294f;
++  --secondary-foreground: #f4f4f4;
++  --muted: #34294f;
++  --muted-foreground: #a8a2c0;
++  --accent: #46345f;
++  --accent-foreground: #f4f4f4;
++  --destructive: #fe4450;
++  --border: #46345f;
++  --input: #34294f;
++  --ring: #ff7edb;
++  --destructive-foreground: #fe4450;
++  --info: #36f9f6;
++  --info-foreground: #36f9f6;
++  --success: #72f1b8;
++  --success-foreground: #72f1b8;
++  --warning: #fede5d;
++  --warning-foreground: #fede5d;
++}
++
++/* Feed the upstream theme bridge from the legacy semantic palette as well as
++ * the document-level selectors, so sidebar and composer descendants retain
++ * the original Claudex colors. */
++html.dark:root[data-theme-id="catppuccin-mocha"] {
++  --app-theme-canvas: #1e1e2e;
++  --app-theme-chrome: #1e1e2e;
++  --app-theme-surface: #181825;
++  --app-theme-surface-overlay: #181825;
++  --app-theme-text: #cdd6f4;
++  --app-theme-text-muted: #a6adc8;
++  --app-theme-border: #45475a;
++  --app-theme-input: #45475a;
++  --app-theme-focus: #cba6f7;
++  --app-theme-accent-surface: #45475a;
++  --app-theme-accent-surface-foreground: #cdd6f4;
++  --app-theme-secondary: #313244;
++  --app-theme-secondary-foreground: #cdd6f4;
++  --app-theme-muted: #313244;
++  --app-theme-message-action: #cba6f7;
++  --app-theme-message-action-foreground: #1e1e2e;
++  --app-theme-error: #f38ba8;
++  --app-theme-error-foreground: #f38ba8;
++  --app-theme-warning: #f9e2af;
++  --app-theme-warning-foreground: #f9e2af;
++  --app-theme-sidebar: #1e1e2e;
++  --app-theme-sidebar-foreground: #cdd6f4;
++  --app-theme-sidebar-muted-foreground: #a6adc8;
++  --app-theme-sidebar-control-surface: #313244;
++  --app-theme-sidebar-row-hover: #45475a;
++  --app-theme-sidebar-row-active: #45475a;
++  --app-theme-sidebar-row-selected: #45475a;
++  --app-theme-sidebar-border: #45475a;
++  --app-theme-code-background: #181825;
++  --app-theme-code-foreground: #cdd6f4;
++  --app-theme-terminal-background: #1e1e2e;
++  --app-theme-terminal-foreground: #cdd6f4;
++  --app-theme-terminal-cursor: #cba6f7;
++  --app-theme-terminal-selection-background: #313244;
++  --app-theme-terminal-scrollbar: #45475a;
++  --app-theme-terminal-scrollbar-hover: #45475a;
++}
++
++html.dark:root[data-theme-id="dracula"] {
++  --app-theme-canvas: #282a36;
++  --app-theme-chrome: #282a36;
++  --app-theme-surface: #21222c;
++  --app-theme-surface-overlay: #21222c;
++  --app-theme-text: #f8f8f2;
++  --app-theme-text-muted: #6272a4;
++  --app-theme-border: #6272a4;
++  --app-theme-input: #44475a;
++  --app-theme-focus: #bd93f9;
++  --app-theme-accent-surface: #44475a;
++  --app-theme-accent-surface-foreground: #f8f8f2;
++  --app-theme-secondary: #44475a;
++  --app-theme-secondary-foreground: #f8f8f2;
++  --app-theme-muted: #44475a;
++  --app-theme-message-action: #bd93f9;
++  --app-theme-message-action-foreground: #282a36;
++  --app-theme-error: #ff5555;
++  --app-theme-error-foreground: #ff5555;
++  --app-theme-warning: #ffb86c;
++  --app-theme-warning-foreground: #ffb86c;
++  --app-theme-sidebar: #282a36;
++  --app-theme-sidebar-foreground: #f8f8f2;
++  --app-theme-sidebar-muted-foreground: #6272a4;
++  --app-theme-sidebar-control-surface: #44475a;
++  --app-theme-sidebar-row-hover: #44475a;
++  --app-theme-sidebar-row-active: #44475a;
++  --app-theme-sidebar-row-selected: #44475a;
++  --app-theme-sidebar-border: #6272a4;
++  --app-theme-code-background: #21222c;
++  --app-theme-code-foreground: #f8f8f2;
++  --app-theme-terminal-background: #282a36;
++  --app-theme-terminal-foreground: #f8f8f2;
++  --app-theme-terminal-cursor: #bd93f9;
++  --app-theme-terminal-selection-background: #44475a;
++  --app-theme-terminal-scrollbar: #6272a4;
++  --app-theme-terminal-scrollbar-hover: #6272a4;
++}
++
++html.dark:root[data-theme-id="one-dark-pro"] {
++  --app-theme-canvas: #282c34;
++  --app-theme-chrome: #282c34;
++  --app-theme-surface: #21252b;
++  --app-theme-surface-overlay: #21252b;
++  --app-theme-text: #abb2bf;
++  --app-theme-text-muted: #7f848e;
++  --app-theme-border: #3e4451;
++  --app-theme-input: #3e4451;
++  --app-theme-focus: #61afef;
++  --app-theme-accent-surface: #3e4451;
++  --app-theme-accent-surface-foreground: #abb2bf;
++  --app-theme-secondary: #3e4451;
++  --app-theme-secondary-foreground: #abb2bf;
++  --app-theme-muted: #3e4451;
++  --app-theme-message-action: #61afef;
++  --app-theme-message-action-foreground: #282c34;
++  --app-theme-error: #e06c75;
++  --app-theme-error-foreground: #e06c75;
++  --app-theme-warning: #e5c07b;
++  --app-theme-warning-foreground: #e5c07b;
++  --app-theme-sidebar: #282c34;
++  --app-theme-sidebar-foreground: #abb2bf;
++  --app-theme-sidebar-muted-foreground: #7f848e;
++  --app-theme-sidebar-control-surface: #3e4451;
++  --app-theme-sidebar-row-hover: #3e4451;
++  --app-theme-sidebar-row-active: #3e4451;
++  --app-theme-sidebar-row-selected: #3e4451;
++  --app-theme-sidebar-border: #3e4451;
++  --app-theme-code-background: #21252b;
++  --app-theme-code-foreground: #abb2bf;
++  --app-theme-terminal-background: #282c34;
++  --app-theme-terminal-foreground: #abb2bf;
++  --app-theme-terminal-cursor: #61afef;
++  --app-theme-terminal-selection-background: #3e4451;
++  --app-theme-terminal-scrollbar: #3e4451;
++  --app-theme-terminal-scrollbar-hover: #3e4451;
++}
++
++html.dark:root[data-theme-id="tokyo-night"] {
++  --app-theme-canvas: #1a1b26;
++  --app-theme-chrome: #1a1b26;
++  --app-theme-surface: #16161e;
++  --app-theme-surface-overlay: #16161e;
++  --app-theme-text: #c0caf5;
++  --app-theme-text-muted: #565f89;
++  --app-theme-border: #292e42;
++  --app-theme-input: #292e42;
++  --app-theme-focus: #7aa2f7;
++  --app-theme-accent-surface: #33467c;
++  --app-theme-accent-surface-foreground: #c0caf5;
++  --app-theme-secondary: #292e42;
++  --app-theme-secondary-foreground: #c0caf5;
++  --app-theme-muted: #292e42;
++  --app-theme-message-action: #7aa2f7;
++  --app-theme-message-action-foreground: #1a1b26;
++  --app-theme-error: #f7768e;
++  --app-theme-error-foreground: #f7768e;
++  --app-theme-warning: #e0af68;
++  --app-theme-warning-foreground: #e0af68;
++  --app-theme-sidebar: #1a1b26;
++  --app-theme-sidebar-foreground: #c0caf5;
++  --app-theme-sidebar-muted-foreground: #565f89;
++  --app-theme-sidebar-control-surface: #292e42;
++  --app-theme-sidebar-row-hover: #33467c;
++  --app-theme-sidebar-row-active: #33467c;
++  --app-theme-sidebar-row-selected: #33467c;
++  --app-theme-sidebar-border: #292e42;
++  --app-theme-code-background: #16161e;
++  --app-theme-code-foreground: #c0caf5;
++  --app-theme-terminal-background: #1a1b26;
++  --app-theme-terminal-foreground: #c0caf5;
++  --app-theme-terminal-cursor: #7aa2f7;
++  --app-theme-terminal-selection-background: #292e42;
++  --app-theme-terminal-scrollbar: #292e42;
++  --app-theme-terminal-scrollbar-hover: #292e42;
++}
++
++html.dark:root[data-theme-id="gruvbox-dark"] {
++  --app-theme-canvas: #282828;
++  --app-theme-chrome: #282828;
++  --app-theme-surface: #1d2021;
++  --app-theme-surface-overlay: #1d2021;
++  --app-theme-text: #ebdbb2;
++  --app-theme-text-muted: #a89984;
++  --app-theme-border: #504945;
++  --app-theme-input: #3c3836;
++  --app-theme-focus: #d79921;
++  --app-theme-accent-surface: #504945;
++  --app-theme-accent-surface-foreground: #ebdbb2;
++  --app-theme-secondary: #3c3836;
++  --app-theme-secondary-foreground: #ebdbb2;
++  --app-theme-muted: #3c3836;
++  --app-theme-message-action: #d79921;
++  --app-theme-message-action-foreground: #282828;
++  --app-theme-error: #fb4934;
++  --app-theme-error-foreground: #fb4934;
++  --app-theme-warning: #fabd2f;
++  --app-theme-warning-foreground: #fabd2f;
++  --app-theme-sidebar: #282828;
++  --app-theme-sidebar-foreground: #ebdbb2;
++  --app-theme-sidebar-muted-foreground: #a89984;
++  --app-theme-sidebar-control-surface: #3c3836;
++  --app-theme-sidebar-row-hover: #504945;
++  --app-theme-sidebar-row-active: #504945;
++  --app-theme-sidebar-row-selected: #504945;
++  --app-theme-sidebar-border: #504945;
++  --app-theme-code-background: #1d2021;
++  --app-theme-code-foreground: #ebdbb2;
++  --app-theme-terminal-background: #282828;
++  --app-theme-terminal-foreground: #ebdbb2;
++  --app-theme-terminal-cursor: #d79921;
++  --app-theme-terminal-selection-background: #3c3836;
++  --app-theme-terminal-scrollbar: #504945;
++  --app-theme-terminal-scrollbar-hover: #504945;
++}
++
++html.dark:root[data-theme-id="nord"] {
++  --app-theme-canvas: #2e3440;
++  --app-theme-chrome: #2e3440;
++  --app-theme-surface: #3b4252;
++  --app-theme-surface-overlay: #3b4252;
++  --app-theme-text: #d8dee9;
++  --app-theme-text-muted: #81a1c1;
++  --app-theme-border: #4c566a;
++  --app-theme-input: #434c5e;
++  --app-theme-focus: #88c0d0;
++  --app-theme-accent-surface: #4c566a;
++  --app-theme-accent-surface-foreground: #d8dee9;
++  --app-theme-secondary: #434c5e;
++  --app-theme-secondary-foreground: #d8dee9;
++  --app-theme-muted: #434c5e;
++  --app-theme-message-action: #88c0d0;
++  --app-theme-message-action-foreground: #2e3440;
++  --app-theme-error: #bf616a;
++  --app-theme-error-foreground: #bf616a;
++  --app-theme-warning: #ebcb8b;
++  --app-theme-warning-foreground: #ebcb8b;
++  --app-theme-sidebar: #2e3440;
++  --app-theme-sidebar-foreground: #d8dee9;
++  --app-theme-sidebar-muted-foreground: #81a1c1;
++  --app-theme-sidebar-control-surface: #434c5e;
++  --app-theme-sidebar-row-hover: #4c566a;
++  --app-theme-sidebar-row-active: #4c566a;
++  --app-theme-sidebar-row-selected: #4c566a;
++  --app-theme-sidebar-border: #4c566a;
++  --app-theme-code-background: #3b4252;
++  --app-theme-code-foreground: #d8dee9;
++  --app-theme-terminal-background: #2e3440;
++  --app-theme-terminal-foreground: #d8dee9;
++  --app-theme-terminal-cursor: #88c0d0;
++  --app-theme-terminal-selection-background: #434c5e;
++  --app-theme-terminal-scrollbar: #4c566a;
++  --app-theme-terminal-scrollbar-hover: #4c566a;
++}
++
++html.dark:root[data-theme-id="github-dark"] {
++  --app-theme-canvas: #0d1117;
++  --app-theme-chrome: #0d1117;
++  --app-theme-surface: #161b22;
++  --app-theme-surface-overlay: #161b22;
++  --app-theme-text: #c9d1d9;
++  --app-theme-text-muted: #8b949e;
++  --app-theme-border: #30363d;
++  --app-theme-input: #21262d;
++  --app-theme-focus: #58a6ff;
++  --app-theme-accent-surface: #30363d;
++  --app-theme-accent-surface-foreground: #c9d1d9;
++  --app-theme-secondary: #21262d;
++  --app-theme-secondary-foreground: #c9d1d9;
++  --app-theme-muted: #21262d;
++  --app-theme-message-action: #58a6ff;
++  --app-theme-message-action-foreground: #0d1117;
++  --app-theme-error: #f85149;
++  --app-theme-error-foreground: #f85149;
++  --app-theme-warning: #d29922;
++  --app-theme-warning-foreground: #d29922;
++  --app-theme-sidebar: #0d1117;
++  --app-theme-sidebar-foreground: #c9d1d9;
++  --app-theme-sidebar-muted-foreground: #8b949e;
++  --app-theme-sidebar-control-surface: #21262d;
++  --app-theme-sidebar-row-hover: #30363d;
++  --app-theme-sidebar-row-active: #30363d;
++  --app-theme-sidebar-row-selected: #30363d;
++  --app-theme-sidebar-border: #30363d;
++  --app-theme-code-background: #161b22;
++  --app-theme-code-foreground: #c9d1d9;
++  --app-theme-terminal-background: #0d1117;
++  --app-theme-terminal-foreground: #c9d1d9;
++  --app-theme-terminal-cursor: #58a6ff;
++  --app-theme-terminal-selection-background: #21262d;
++  --app-theme-terminal-scrollbar: #30363d;
++  --app-theme-terminal-scrollbar-hover: #30363d;
++}
++
++html.dark:root[data-theme-id="material-theme-palenight"] {
++  --app-theme-canvas: #292d3e;
++  --app-theme-chrome: #292d3e;
++  --app-theme-surface: #1f2233;
++  --app-theme-surface-overlay: #1f2233;
++  --app-theme-text: #a6accd;
++  --app-theme-text-muted: #676e95;
++  --app-theme-border: #434758;
++  --app-theme-input: #3a3f58;
++  --app-theme-focus: #c792ea;
++  --app-theme-accent-surface: #434758;
++  --app-theme-accent-surface-foreground: #a6accd;
++  --app-theme-secondary: #3a3f58;
++  --app-theme-secondary-foreground: #a6accd;
++  --app-theme-muted: #3a3f58;
++  --app-theme-message-action: #c792ea;
++  --app-theme-message-action-foreground: #292d3e;
++  --app-theme-error: #f07178;
++  --app-theme-error-foreground: #f07178;
++  --app-theme-warning: #ffcb6b;
++  --app-theme-warning-foreground: #ffcb6b;
++  --app-theme-sidebar: #292d3e;
++  --app-theme-sidebar-foreground: #a6accd;
++  --app-theme-sidebar-muted-foreground: #676e95;
++  --app-theme-sidebar-control-surface: #3a3f58;
++  --app-theme-sidebar-row-hover: #434758;
++  --app-theme-sidebar-row-active: #434758;
++  --app-theme-sidebar-row-selected: #434758;
++  --app-theme-sidebar-border: #434758;
++  --app-theme-code-background: #1f2233;
++  --app-theme-code-foreground: #a6accd;
++  --app-theme-terminal-background: #292d3e;
++  --app-theme-terminal-foreground: #a6accd;
++  --app-theme-terminal-cursor: #c792ea;
++  --app-theme-terminal-selection-background: #3a3f58;
++  --app-theme-terminal-scrollbar: #434758;
++  --app-theme-terminal-scrollbar-hover: #434758;
++}
++
++html.dark:root[data-theme-id="rose-pine"] {
++  --app-theme-canvas: #191724;
++  --app-theme-chrome: #191724;
++  --app-theme-surface: #1f1d2e;
++  --app-theme-surface-overlay: #1f1d2e;
++  --app-theme-text: #e0def4;
++  --app-theme-text-muted: #908caa;
++  --app-theme-border: #403d52;
++  --app-theme-input: #26233a;
++  --app-theme-focus: #c4a7e7;
++  --app-theme-accent-surface: #403d52;
++  --app-theme-accent-surface-foreground: #e0def4;
++  --app-theme-secondary: #26233a;
++  --app-theme-secondary-foreground: #e0def4;
++  --app-theme-muted: #26233a;
++  --app-theme-message-action: #c4a7e7;
++  --app-theme-message-action-foreground: #191724;
++  --app-theme-error: #eb6f92;
++  --app-theme-error-foreground: #eb6f92;
++  --app-theme-warning: #f6c177;
++  --app-theme-warning-foreground: #f6c177;
++  --app-theme-sidebar: #191724;
++  --app-theme-sidebar-foreground: #e0def4;
++  --app-theme-sidebar-muted-foreground: #908caa;
++  --app-theme-sidebar-control-surface: #26233a;
++  --app-theme-sidebar-row-hover: #403d52;
++  --app-theme-sidebar-row-active: #403d52;
++  --app-theme-sidebar-row-selected: #403d52;
++  --app-theme-sidebar-border: #403d52;
++  --app-theme-code-background: #1f1d2e;
++  --app-theme-code-foreground: #e0def4;
++  --app-theme-terminal-background: #191724;
++  --app-theme-terminal-foreground: #e0def4;
++  --app-theme-terminal-cursor: #c4a7e7;
++  --app-theme-terminal-selection-background: #26233a;
++  --app-theme-terminal-scrollbar: #403d52;
++  --app-theme-terminal-scrollbar-hover: #403d52;
++}
++
++html.dark:root[data-theme-id="kanagawa-dragon"] {
++  --app-theme-canvas: #181616;
++  --app-theme-chrome: #181616;
++  --app-theme-surface: #1f1f1f;
++  --app-theme-surface-overlay: #1f1f1f;
++  --app-theme-text: #c5c9c5;
++  --app-theme-text-muted: #8a8a8a;
++  --app-theme-border: #3a3a3a;
++  --app-theme-input: #2a2a2a;
++  --app-theme-focus: #c4b28a;
++  --app-theme-accent-surface: #3a3a3a;
++  --app-theme-accent-surface-foreground: #c5c9c5;
++  --app-theme-secondary: #2a2a2a;
++  --app-theme-secondary-foreground: #c5c9c5;
++  --app-theme-muted: #2a2a2a;
++  --app-theme-message-action: #c4b28a;
++  --app-theme-message-action-foreground: #181616;
++  --app-theme-error: #c4746e;
++  --app-theme-error-foreground: #c4746e;
++  --app-theme-warning: #c4b28a;
++  --app-theme-warning-foreground: #c4b28a;
++  --app-theme-sidebar: #181616;
++  --app-theme-sidebar-foreground: #c5c9c5;
++  --app-theme-sidebar-muted-foreground: #8a8a8a;
++  --app-theme-sidebar-control-surface: #2a2a2a;
++  --app-theme-sidebar-row-hover: #3a3a3a;
++  --app-theme-sidebar-row-active: #3a3a3a;
++  --app-theme-sidebar-row-selected: #3a3a3a;
++  --app-theme-sidebar-border: #3a3a3a;
++  --app-theme-code-background: #1f1f1f;
++  --app-theme-code-foreground: #c5c9c5;
++  --app-theme-terminal-background: #181616;
++  --app-theme-terminal-foreground: #c5c9c5;
++  --app-theme-terminal-cursor: #c4b28a;
++  --app-theme-terminal-selection-background: #2a2a2a;
++  --app-theme-terminal-scrollbar: #3a3a3a;
++  --app-theme-terminal-scrollbar-hover: #3a3a3a;
++}
++
++html.dark:root[data-theme-id="everforest-dark"] {
++  --app-theme-canvas: #2d353b;
++  --app-theme-chrome: #2d353b;
++  --app-theme-surface: #343f44;
++  --app-theme-surface-overlay: #343f44;
++  --app-theme-text: #d3c6aa;
++  --app-theme-text-muted: #859289;
++  --app-theme-border: #475258;
++  --app-theme-input: #3d484d;
++  --app-theme-focus: #a7c080;
++  --app-theme-accent-surface: #475258;
++  --app-theme-accent-surface-foreground: #d3c6aa;
++  --app-theme-secondary: #3d484d;
++  --app-theme-secondary-foreground: #d3c6aa;
++  --app-theme-muted: #3d484d;
++  --app-theme-message-action: #a7c080;
++  --app-theme-message-action-foreground: #2d353b;
++  --app-theme-error: #e67e80;
++  --app-theme-error-foreground: #e67e80;
++  --app-theme-warning: #dbbc7f;
++  --app-theme-warning-foreground: #dbbc7f;
++  --app-theme-sidebar: #2d353b;
++  --app-theme-sidebar-foreground: #d3c6aa;
++  --app-theme-sidebar-muted-foreground: #859289;
++  --app-theme-sidebar-control-surface: #3d484d;
++  --app-theme-sidebar-row-hover: #475258;
++  --app-theme-sidebar-row-active: #475258;
++  --app-theme-sidebar-row-selected: #475258;
++  --app-theme-sidebar-border: #475258;
++  --app-theme-code-background: #343f44;
++  --app-theme-code-foreground: #d3c6aa;
++  --app-theme-terminal-background: #2d353b;
++  --app-theme-terminal-foreground: #d3c6aa;
++  --app-theme-terminal-cursor: #a7c080;
++  --app-theme-terminal-selection-background: #3d484d;
++  --app-theme-terminal-scrollbar: #475258;
++  --app-theme-terminal-scrollbar-hover: #475258;
++}
++
++html.dark:root[data-theme-id="monokai"] {
++  --app-theme-canvas: #272822;
++  --app-theme-chrome: #272822;
++  --app-theme-surface: #1e1f1c;
++  --app-theme-surface-overlay: #1e1f1c;
++  --app-theme-text: #f8f8f2;
++  --app-theme-text-muted: #a6a69c;
++  --app-theme-border: #49483e;
++  --app-theme-input: #3e3d32;
++  --app-theme-focus: #a6e22e;
++  --app-theme-accent-surface: #49483e;
++  --app-theme-accent-surface-foreground: #f8f8f2;
++  --app-theme-secondary: #3e3d32;
++  --app-theme-secondary-foreground: #f8f8f2;
++  --app-theme-muted: #3e3d32;
++  --app-theme-message-action: #a6e22e;
++  --app-theme-message-action-foreground: #272822;
++  --app-theme-error: #f92672;
++  --app-theme-error-foreground: #f92672;
++  --app-theme-warning: #e6db74;
++  --app-theme-warning-foreground: #e6db74;
++  --app-theme-sidebar: #272822;
++  --app-theme-sidebar-foreground: #f8f8f2;
++  --app-theme-sidebar-muted-foreground: #a6a69c;
++  --app-theme-sidebar-control-surface: #3e3d32;
++  --app-theme-sidebar-row-hover: #49483e;
++  --app-theme-sidebar-row-active: #49483e;
++  --app-theme-sidebar-row-selected: #49483e;
++  --app-theme-sidebar-border: #49483e;
++  --app-theme-code-background: #1e1f1c;
++  --app-theme-code-foreground: #f8f8f2;
++  --app-theme-terminal-background: #272822;
++  --app-theme-terminal-foreground: #f8f8f2;
++  --app-theme-terminal-cursor: #a6e22e;
++  --app-theme-terminal-selection-background: #3e3d32;
++  --app-theme-terminal-scrollbar: #49483e;
++  --app-theme-terminal-scrollbar-hover: #49483e;
++}
++
++html.dark:root[data-theme-id="vitesse-dark"] {
++  --app-theme-canvas: #121212;
++  --app-theme-chrome: #121212;
++  --app-theme-surface: #181818;
++  --app-theme-surface-overlay: #181818;
++  --app-theme-text: #dbd7ca;
++  --app-theme-text-muted: #888;
++  --app-theme-border: #333;
++  --app-theme-input: #252525;
++  --app-theme-focus: #4d9375;
++  --app-theme-accent-surface: #333;
++  --app-theme-accent-surface-foreground: #dbd7ca;
++  --app-theme-secondary: #252525;
++  --app-theme-secondary-foreground: #dbd7ca;
++  --app-theme-muted: #252525;
++  --app-theme-message-action: #4d9375;
++  --app-theme-message-action-foreground: #121212;
++  --app-theme-error: #cb7676;
++  --app-theme-error-foreground: #cb7676;
++  --app-theme-warning: #bd976a;
++  --app-theme-warning-foreground: #bd976a;
++  --app-theme-sidebar: #121212;
++  --app-theme-sidebar-foreground: #dbd7ca;
++  --app-theme-sidebar-muted-foreground: #888;
++  --app-theme-sidebar-control-surface: #252525;
++  --app-theme-sidebar-row-hover: #333;
++  --app-theme-sidebar-row-active: #333;
++  --app-theme-sidebar-row-selected: #333;
++  --app-theme-sidebar-border: #333;
++  --app-theme-code-background: #181818;
++  --app-theme-code-foreground: #dbd7ca;
++  --app-theme-terminal-background: #121212;
++  --app-theme-terminal-foreground: #dbd7ca;
++  --app-theme-terminal-cursor: #4d9375;
++  --app-theme-terminal-selection-background: #252525;
++  --app-theme-terminal-scrollbar: #333;
++  --app-theme-terminal-scrollbar-hover: #333;
++}
++
++html.dark:root[data-theme-id="solarized-dark"] {
++  --app-theme-canvas: #002b36;
++  --app-theme-chrome: #002b36;
++  --app-theme-surface: #073642;
++  --app-theme-surface-overlay: #073642;
++  --app-theme-text: #839496;
++  --app-theme-text-muted: #657b83;
++  --app-theme-border: #0e4d5a;
++  --app-theme-input: #073642;
++  --app-theme-focus: #268bd2;
++  --app-theme-accent-surface: #0e4d5a;
++  --app-theme-accent-surface-foreground: #839496;
++  --app-theme-secondary: #073642;
++  --app-theme-secondary-foreground: #839496;
++  --app-theme-muted: #073642;
++  --app-theme-message-action: #268bd2;
++  --app-theme-message-action-foreground: #002b36;
++  --app-theme-error: #dc322f;
++  --app-theme-error-foreground: #dc322f;
++  --app-theme-warning: #b58900;
++  --app-theme-warning-foreground: #b58900;
++  --app-theme-sidebar: #002b36;
++  --app-theme-sidebar-foreground: #839496;
++  --app-theme-sidebar-muted-foreground: #657b83;
++  --app-theme-sidebar-control-surface: #073642;
++  --app-theme-sidebar-row-hover: #0e4d5a;
++  --app-theme-sidebar-row-active: #0e4d5a;
++  --app-theme-sidebar-row-selected: #0e4d5a;
++  --app-theme-sidebar-border: #0e4d5a;
++  --app-theme-code-background: #073642;
++  --app-theme-code-foreground: #839496;
++  --app-theme-terminal-background: #002b36;
++  --app-theme-terminal-foreground: #839496;
++  --app-theme-terminal-cursor: #268bd2;
++  --app-theme-terminal-selection-background: #073642;
++  --app-theme-terminal-scrollbar: #0e4d5a;
++  --app-theme-terminal-scrollbar-hover: #0e4d5a;
++}
++
++html.dark:root[data-theme-id="synthwave-84"] {
++  --app-theme-canvas: #262335;
++  --app-theme-chrome: #262335;
++  --app-theme-surface: #2a2139;
++  --app-theme-surface-overlay: #2a2139;
++  --app-theme-text: #f4f4f4;
++  --app-theme-text-muted: #a8a2c0;
++  --app-theme-border: #46345f;
++  --app-theme-input: #34294f;
++  --app-theme-focus: #ff7edb;
++  --app-theme-accent-surface: #46345f;
++  --app-theme-accent-surface-foreground: #f4f4f4;
++  --app-theme-secondary: #34294f;
++  --app-theme-secondary-foreground: #f4f4f4;
++  --app-theme-muted: #34294f;
++  --app-theme-message-action: #ff7edb;
++  --app-theme-message-action-foreground: #262335;
++  --app-theme-error: #fe4450;
++  --app-theme-error-foreground: #fe4450;
++  --app-theme-warning: #fede5d;
++  --app-theme-warning-foreground: #fede5d;
++  --app-theme-sidebar: #262335;
++  --app-theme-sidebar-foreground: #f4f4f4;
++  --app-theme-sidebar-muted-foreground: #a8a2c0;
++  --app-theme-sidebar-control-surface: #34294f;
++  --app-theme-sidebar-row-hover: #46345f;
++  --app-theme-sidebar-row-active: #46345f;
++  --app-theme-sidebar-row-selected: #46345f;
++  --app-theme-sidebar-border: #46345f;
++  --app-theme-code-background: #2a2139;
++  --app-theme-code-foreground: #f4f4f4;
++  --app-theme-terminal-background: #262335;
++  --app-theme-terminal-foreground: #f4f4f4;
++  --app-theme-terminal-cursor: #ff7edb;
++  --app-theme-terminal-selection-background: #34294f;
++  --app-theme-terminal-scrollbar: #46345f;
++  --app-theme-terminal-scrollbar-hover: #46345f;
++}
+diff --git a/apps/web/src/components/ChatView.tsx b/apps/web/src/components/ChatView.tsx
+index 880bf8a507fede4390b7bbe5fe95ae4cbd501654..f4b3d2459e9000a1780e51f8557a2edd890c5552 100644
+--- a/apps/web/src/components/ChatView.tsx
++++ b/apps/web/src/components/ChatView.tsx
+@@ -1489,7 +1489,8 @@ function ChatViewContent(props: ChatViewProps) {
+   const threadError = isServerThread
+     ? (localServerError ?? activeServerThread?.session?.lastError ?? null)
+     : localDraftError;
+-  const runtimeMode = composerRuntimeMode ?? activeThread?.runtimeMode ?? DEFAULT_RUNTIME_MODE;
++  const requestedRuntimeMode =
++    composerRuntimeMode ?? activeThread?.runtimeMode ?? DEFAULT_RUNTIME_MODE;
+   // Plan mode is legacy (Settings → Beta). With the flag off the effective
+   // mode is forced to "default" — even for threads with a stored plan mode —
+   // so nobody is trapped in plan mode while its toggle is hidden. The next
+@@ -2133,6 +2134,7 @@ function ChatViewContent(props: ChatViewProps) {
+     selectedProviderByThreadId ?? threadProvider,
+   );
+   const selectedProvider: ProviderDriverKind = lockedProvider ?? unlockedSelectedProvider;
++  const runtimeMode: RuntimeMode = selectedProvider === "pi" ? "full-access" : requestedRuntimeMode;
+   const phase = derivePhase(activeThread?.session ?? null);
+   const threadActivities = activeThread?.activities ?? EMPTY_ACTIVITIES;
+   const workLogEntries = useMemo(() => deriveWorkLogEntries(threadActivities), [threadActivities]);
+diff --git a/apps/web/src/components/Icons.tsx b/apps/web/src/components/Icons.tsx
+index 8ea38c519588e39e3581b2d0d0c86d5656efb8b2..d6844defa56de100475b9cc2fe283de68d43e7c7 100644
+--- a/apps/web/src/components/Icons.tsx
++++ b/apps/web/src/components/Icons.tsx
+@@ -696,3 +696,5 @@ export const PiAgentIcon: Icon = ({ className, ...props }) => (
+     <path fill="#fff" d="M517.36 400H634.72V634.72H517.36Z" />
+   </svg>
+ );
++
++export const PrimeAgentIcon: Icon = PiAgentIcon;
+diff --git a/apps/web/src/components/chat/ChatComposer.tsx b/apps/web/src/components/chat/ChatComposer.tsx
+index 38490aeaa7e4c58c610631a72cbf27a0167e2a53..5226c3d3463e125feeb6dfceb085b9f5fcb71935 100644
+--- a/apps/web/src/components/chat/ChatComposer.tsx
++++ b/apps/web/src/components/chat/ChatComposer.tsx
+@@ -681,6 +681,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
+   const nonPersistedComposerImageIds = composerDraft.nonPersistedImageIds;
+ 
+   const setComposerDraftPrompt = useComposerDraftStore((store) => store.setPrompt);
++  const setComposerDraftRuntimeMode = useComposerDraftStore((store) => store.setRuntimeMode);
+   const addComposerDraftImage = useComposerDraftStore((store) => store.addImage);
+   const addComposerDraftImages = useComposerDraftStore((store) => store.addImages);
+   const removeComposerDraftImage = useComposerDraftStore((store) => store.removeImage);
+@@ -891,6 +892,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
+     [selectedInstanceId, selectedModel, selectedModelOptionsForDispatch],
+   );
+   const selectedModelForPicker = selectedModel;
++  const effectiveRuntimeMode: RuntimeMode = selectedProvider === "pi" ? "full-access" : runtimeMode;
++  useEffect(() => {
++    if (selectedProvider === "pi" && composerDraft.runtimeMode !== "full-access") {
++      setComposerDraftRuntimeMode(composerDraftTarget, "full-access");
++    }
++  }, [
++    composerDraft.runtimeMode,
++    composerDraftTarget,
++    selectedProvider,
++    setComposerDraftRuntimeMode,
++  ]);
+   // Instance-keyed option list so the picker can show each configured
+   // instance (built-in + custom) as a first-class sidebar entry. The
+   // options are server-reported models plus that exact instance's
+@@ -3149,11 +3161,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
+                 {isComposerFooterCompact ? (
+                   <CompactComposerControlsMenu
+                     interactionMode={interactionMode}
+-                    runtimeMode={runtimeMode}
++                    runtimeMode={effectiveRuntimeMode}
+                     showInteractionModeToggle={composerProviderControls.showInteractionModeToggle}
+                     traitsMenuContent={providerTraitsMenuContent}
+                     onToggleInteractionMode={toggleInteractionMode}
+-                    onRuntimeModeChange={handleRuntimeModeChange}
++                    onRuntimeModeChange={
++                      selectedProvider === "pi" ? () => undefined : handleRuntimeModeChange
++                    }
+                   />
+                 ) : (
+                   <>
+@@ -3166,9 +3180,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
+                     <ComposerFooterModeControls
+                       showInteractionModeToggle={composerProviderControls.showInteractionModeToggle}
+                       interactionMode={interactionMode}
+-                      runtimeMode={runtimeMode}
++                      runtimeMode={effectiveRuntimeMode}
+                       onToggleInteractionMode={toggleInteractionMode}
+-                      onRuntimeModeChange={handleRuntimeModeChange}
++                      onRuntimeModeChange={
++                        selectedProvider === "pi" ? () => undefined : handleRuntimeModeChange
++                      }
+                     />
+                   </>
+                 )}
+diff --git a/apps/web/src/components/chat/providerIconUtils.ts b/apps/web/src/components/chat/providerIconUtils.ts
+index 842c616fe1feedee58290925fdae2f3d47d3fedd..99eef10203a1da761d0e036fca96e108ece69ef4 100644
+--- a/apps/web/src/components/chat/providerIconUtils.ts
++++ b/apps/web/src/components/chat/providerIconUtils.ts
+@@ -1,5 +1,14 @@
+ import { ProviderDriverKind } from "@t3tools/contracts";
+-import { ClaudeAI, CursorIcon, GrokIcon, Icon, OpenAI, OpenCodeIcon } from "../Icons";
++import {
++  ClaudeAI,
++  CursorIcon,
++  GrokIcon,
++  Icon,
++  OpenAI,
++  OpenCodeIcon,
++  PiAgentIcon,
++  PrimeAgentIcon,
++} from "../Icons";
+ import { PROVIDER_OPTIONS } from "../../session-logic";
+ 
+ export const PROVIDER_ICON_BY_PROVIDER: Partial<Record<ProviderDriverKind, Icon>> = {
+@@ -8,6 +17,8 @@ export const PROVIDER_ICON_BY_PROVIDER: Partial<Record<ProviderDriverKind, Icon>
+   [ProviderDriverKind.make("opencode")]: OpenCodeIcon,
+   [ProviderDriverKind.make("cursor")]: CursorIcon,
+   [ProviderDriverKind.make("grok")]: GrokIcon,
++  [ProviderDriverKind.make("pi")]: PiAgentIcon,
++  [ProviderDriverKind.make("primeAgent")]: PrimeAgentIcon,
+ };
+ 
+ function isAvailableProviderOption(option: (typeof PROVIDER_OPTIONS)[number]): option is {
+diff --git a/apps/web/src/components/settings/AddProviderInstanceDialog.tsx b/apps/web/src/components/settings/AddProviderInstanceDialog.tsx
+index 158908b5e9428a84db3de7ce4aeef1858d319acc..9428a01301de43fd695650da8bfb1465a69971e3 100644
+--- a/apps/web/src/components/settings/AddProviderInstanceDialog.tsx
++++ b/apps/web/src/components/settings/AddProviderInstanceDialog.tsx
+@@ -14,7 +14,7 @@ import { useEnvironmentSettings, useUpdateEnvironmentSettings } from "../../hook
+ import { cn } from "../../lib/utils";
+ import { normalizeProviderAccentColor } from "../../providerInstances";
+ import { Button } from "../ui/button";
+-import { ACPRegistryIcon, Gemini, GithubCopilotIcon, PiAgentIcon, type Icon } from "../Icons";
++import { ACPRegistryIcon, Gemini, GithubCopilotIcon, type Icon } from "../Icons";
+ import {
+   Dialog,
+   DialogDescription,
+@@ -93,11 +93,6 @@ const COMING_SOON_DRIVER_OPTIONS: readonly ComingSoonDriverOption[] = [
+     label: "ACP Registry",
+     icon: ACPRegistryIcon,
+   },
+-  {
+-    value: ProviderDriverKind.make("piAgent"),
+-    label: "Pi Agent",
+-    icon: PiAgentIcon,
+-  },
+ ];
+ 
+ /**
+diff --git a/apps/web/src/components/settings/ThemeSettings.tsx b/apps/web/src/components/settings/ThemeSettings.tsx
+index 02897205e03a6813e6203b14d8e2a8ec59632d04..50f5fc614a6fcd7962db4ae6a5359230716a3b6f 100644
+--- a/apps/web/src/components/settings/ThemeSettings.tsx
++++ b/apps/web/src/components/settings/ThemeSettings.tsx
+@@ -17,6 +17,7 @@ import {
+   type ThemeDefinition,
+   type ThemeHalves,
+   T3_CHAT_THEME,
++  CLAUDEX_THEMES,
+   EMBER_THEME,
+   GROVE_THEME,
+   IRIS_THEME,
+@@ -52,6 +53,7 @@ const MAINTAINER_THEMES: ReadonlyArray<ThemeDefinition> = [
+   OCEAN_THEME,
+   EMBER_THEME,
+   IRIS_THEME,
++  ...CLAUDEX_THEMES,
+ ];
+ 
+ function downloadThemeFile(filename: string, contents: string): void {
+@@ -495,7 +497,11 @@ export function ThemeLibrary({
+                   initialAppearance,
+                 })
+               }
+-              onUse={() => persistTheme(maintainerTheme.id)}
++              onUse={() => {
++                const modes = getThemeModes(maintainerTheme);
++                if (modes.length === 1) assignHalf(modes[0]!, maintainerTheme.id);
++                else persistTheme(maintainerTheme.id);
++              }}
+               onUseMode={handlePairPick(maintainerTheme.id)}
+               theme={card}
+             />
+diff --git a/apps/web/src/components/settings/providerDriverMeta.test.ts b/apps/web/src/components/settings/providerDriverMeta.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..44d613c71dda54c82b79009f2c7a83d7f284a0d8
+--- /dev/null
++++ b/apps/web/src/components/settings/providerDriverMeta.test.ts
+@@ -0,0 +1,36 @@
++import { describe, expect, it } from "vite-plus/test";
++
++import {
++  AntigravitySettings,
++  PiSettings,
++  PrimeAgentSettings,
++  ProviderDriverKind,
++} from "@t3tools/contracts";
++import { AntigravityIcon, PiAgentIcon, PrimeAgentIcon } from "../Icons";
++import { getDriverOption } from "./providerDriverMeta";
++
++describe("provider driver metadata", () => {
++  it("exposes Pi as a configured provider with its native settings card", () => {
++    const option = getDriverOption(ProviderDriverKind.make("pi"));
++
++    expect(option).toBeDefined();
++    expect(option?.label).toBe("Pi");
++    expect(option?.icon).toBe(PiAgentIcon);
++    expect(option?.settingsSchema).toBe(PiSettings);
++    expect(option?.badgeLabel).toBeUndefined();
++  });
++
++  it("exposes Prime Agent with its documented metadata and settings", () => {
++    const option = getDriverOption(ProviderDriverKind.make("primeAgent"));
++    expect(option?.label).toBe("Prime Agent");
++    expect(option?.icon).toBe(PrimeAgentIcon);
++    expect(option?.settingsSchema).toBe(PrimeAgentSettings);
++  });
++
++  it("exposes Antigravity with the direct CLI setting", () => {
++    const option = getDriverOption(ProviderDriverKind.make("antigravity"));
++    expect(option?.label).toBe("Antigravity");
++    expect(option?.icon).toBe(AntigravityIcon);
++    expect(option?.settingsSchema).toBe(AntigravitySettings);
++  });
++});
+diff --git a/apps/web/src/components/settings/providerDriverMeta.ts b/apps/web/src/components/settings/providerDriverMeta.ts
+index bfee6a8d68075493128f84c7275ac0be841a431b..4ddca83bdec2bf876ca33ccfe65f2bc8fb418704 100644
+--- a/apps/web/src/components/settings/providerDriverMeta.ts
++++ b/apps/web/src/components/settings/providerDriverMeta.ts
+@@ -3,11 +3,24 @@ import {
+   CodexSettings,
+   CursorSettings,
+   GrokSettings,
++  AntigravitySettings,
+   OpenCodeSettings,
++  PiSettings,
+   ProviderDriverKind,
+ } from "@t3tools/contracts";
+ import type * as Schema from "effect/Schema";
+-import { ClaudeAI, CursorIcon, GrokIcon, type Icon, OpenAI, OpenCodeIcon } from "../Icons";
++import {
++  ClaudeAI,
++  CursorIcon,
++  GrokIcon,
++  AntigravityIcon,
++  type Icon,
++  OpenAI,
++  OpenCodeIcon,
++  PiAgentIcon,
++  PrimeAgentIcon,
++} from "../Icons";
++import { PrimeAgentSettings } from "@t3tools/contracts";
+ 
+ type ProviderSettingsSchema = {
+   readonly fields: Readonly<Record<string, Schema.Top>>;
+@@ -67,6 +80,24 @@ export const PROVIDER_CLIENT_DEFINITIONS: readonly ProviderClientDefinition[] =
+     icon: OpenCodeIcon,
+     settingsSchema: OpenCodeSettings,
+   },
++  {
++    value: ProviderDriverKind.make("pi"),
++    label: "Pi",
++    icon: PiAgentIcon,
++    settingsSchema: PiSettings,
++  },
++  {
++    value: ProviderDriverKind.make("primeAgent"),
++    label: "Prime Agent",
++    icon: PrimeAgentIcon,
++    settingsSchema: PrimeAgentSettings,
++  },
++  {
++    value: ProviderDriverKind.make("antigravity"),
++    label: "Antigravity",
++    icon: AntigravityIcon,
++    settingsSchema: AntigravitySettings,
++  },
+ ];
+ 
+ export const PROVIDER_CLIENT_DEFINITION_BY_VALUE: Partial<
+diff --git a/apps/web/src/hooks/useTheme.test.ts b/apps/web/src/hooks/useTheme.test.ts
+index ab87388ff2981db3e0a3397513805b4615fd6d71..a825c8b5bb5bc186df24c228e62bdffc6ea5a533 100644
+--- a/apps/web/src/hooks/useTheme.test.ts
++++ b/apps/web/src/hooks/useTheme.test.ts
+@@ -27,6 +27,16 @@ afterEach(() => {
+ });
+ 
+ describe("theme failure handling", () => {
++  it("preserves a custom dark theme stored by an earlier Claudex build", async () => {
++    const storage = createStorage();
++    storage.setItem("t3code:theme", "catppuccin-mocha");
++    vi.stubGlobal("window", { localStorage: storage });
++
++    const { readThemePreference } = await import("./useTheme");
++
++    expect(readThemePreference()).toBe("catppuccin-mocha");
++  });
++
+   it("preserves exact storage causes and operation context", async () => {
+     const readCause = new Error("storage read blocked");
+     const writeCause = new Error("storage quota exceeded");
+diff --git a/apps/web/src/index.css b/apps/web/src/index.css
+index 72983930aafb1a3d2e7e5b50fb590a530ba3bc6e..6cf41efb4e83b34db711abff9eb9f6518f8a2df1 100644
+--- a/apps/web/src/index.css
++++ b/apps/web/src/index.css
+@@ -1,4 +1,5 @@
+ @import "tailwindcss";
++@import "./claudexThemes.css";
+ 
+ @custom-variant dark (&:is(.dark, .dark *));
+ /* Window Controls Overlay: active when Electron exposes native titlebar control geometry. */
+diff --git a/apps/web/src/session-logic.ts b/apps/web/src/session-logic.ts
+index 4d0a76cf133b33b89cbaa939353c2939afc6b0b5..c48f02dd48ebaa5274bea92de6fe43f2bdbe081b 100644
+--- a/apps/web/src/session-logic.ts
++++ b/apps/web/src/session-logic.ts
+@@ -52,6 +52,18 @@ export const PROVIDER_OPTIONS: Array<{
+     available: true,
+     pickerSidebarBadge: "new",
+   },
++  {
++    value: ProviderDriverKind.make("pi"),
++    label: "Pi",
++    available: true,
++    pickerSidebarBadge: "new",
++  },
++  {
++    value: ProviderDriverKind.make("primeAgent"),
++    label: "Prime Agent",
++    available: true,
++    pickerSidebarBadge: "new",
++  },
+ ];
+ 
+ export type WorkLogToolLifecycleStatus =
+diff --git a/apps/web/src/themeBoot.test.ts b/apps/web/src/themeBoot.test.ts
+index d6137e643818b4a7164d3f139b42b0fe6ef58fe7..d3946c1ba0369699597b749c5575cff89d6f962b 100644
+--- a/apps/web/src/themeBoot.test.ts
++++ b/apps/web/src/themeBoot.test.ts
+@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vite-plus/test";
+ import indexHtml from "../index.html?raw";
+ import {
+   CUSTOM_THEMES_STORAGE_KEY,
++  CLAUDEX_THEMES,
+   getDefaultThemeColors,
+   getThemeColorsForMode,
+   invalidateCustomThemes,
+@@ -244,6 +245,11 @@ describe("index.html boot script", () => {
+       storage: { [THEME_STORAGE_KEY]: "dark", [THEME_FOLLOW_SYSTEM_STORAGE_KEY]: "false" },
+       prefersDark: false,
+     },
++    ...CLAUDEX_THEMES.map((theme) => ({
++      name: `${theme.id} is recognized before React mounts`,
++      storage: { [THEME_STORAGE_KEY]: theme.id },
++      prefersDark: false,
++    })),
+   ];
+ 
+   it.each(parityCases)("matches the runtime appearance: $name", ({ storage, prefersDark }) => {
+@@ -303,6 +309,20 @@ describe("index.html boot script", () => {
+     }
+   });
+ 
++  it("keeps every Claudex palette visible during boot", () => {
++    for (const theme of CLAUDEX_THEMES) {
++      const colors = getThemeColorsForMode(theme, "dark")!;
++      const boot = runBootScript({
++        storage: { [THEME_STORAGE_KEY]: theme.id },
++        prefersDark: false,
++      });
++      expect(boot.themeId).toBe(theme.id);
++      expect(boot.isDark).toBe(true);
++      expect(boot.bootVariables["--boot-background"]).toBe(colors.canvas);
++      expect(boot.bootVariables["--boot-accent"]).toBe(colors.accent);
++    }
++  });
++
+   it("applies the matching half of an automatic mix to the splash", () => {
+     const storage = {
+       [THEME_STORAGE_KEY]: "t3-chat",
+diff --git a/apps/web/src/themePalette.test.ts b/apps/web/src/themePalette.test.ts
+index 671b5dbb76d263ebff775c6bcbe2c3e9ab419d74..80e288cd45e7282cd5422d5ef299348eb36867f4 100644
+--- a/apps/web/src/themePalette.test.ts
++++ b/apps/web/src/themePalette.test.ts
+@@ -27,6 +27,7 @@ import {
+   OCEAN_THEME,
+   updateCustomTheme,
+   CUSTOM_THEMES_STORAGE_KEY,
++  CLAUDEX_THEMES,
+   createManagedThemeColors,
+   createVividThemeColors,
+   getDefaultThemeColors,
+@@ -356,6 +357,17 @@ describe("theme files", () => {
+     }
+   });
+ 
++  it("keeps the 15 Claudex themes registered after the theme-library migration", () => {
++    expect(CLAUDEX_THEMES).toHaveLength(15);
++    for (const theme of CLAUDEX_THEMES) {
++      expect(getThemeDefinition(theme.id)).toBe(theme);
++      expect(getThemeModes(theme)).toEqual(["dark"]);
++      expect(theme.colors.canvas).toMatch(/^#[0-9a-f]{6}$/i);
++      expect(theme.colors.accent).toMatch(/^#[0-9a-f]{6}$/i);
++      expect(isKnownThemePreference(theme.id)).toBe(true);
++    }
++  });
++
+   it("rejects a variant that repeats the base appearance", () => {
+     expect(() =>
+       parseThemeFile({
+diff --git a/apps/web/src/themePalette.ts b/apps/web/src/themePalette.ts
+index 686201fa2d927f7f95595bf09a88d0f9c76affe2..8b77b62877f9533e64055f0984e8b40820978f11 100644
+--- a/apps/web/src/themePalette.ts
++++ b/apps/web/src/themePalette.ts
+@@ -127,6 +127,21 @@ const RESERVED_THEME_IDS = new Set([
+   "t3-ocean",
+   "t3-ember",
+   "t3-iris",
++  "catppuccin-mocha",
++  "dracula",
++  "one-dark-pro",
++  "tokyo-night",
++  "gruvbox-dark",
++  "nord",
++  "github-dark",
++  "material-theme-palenight",
++  "rose-pine",
++  "kanagawa-dragon",
++  "everforest-dark",
++  "monokai",
++  "vitesse-dark",
++  "solarized-dark",
++  "synthwave-84",
+ ]);
+ 
+ const customThemeListeners = new Set<() => void>();
+@@ -1384,12 +1399,41 @@ export const IRIS_THEME: ThemeDefinition = {
+   },
+ };
+ 
++const CLAUDEX_THEME_SPECS = [
++  ["catppuccin-mocha", "Catppuccin Mocha", "#1e1e2e", "#cba6f7"],
++  ["dracula", "Dracula", "#282a36", "#bd93f9"],
++  ["one-dark-pro", "One Dark Pro", "#282c34", "#61afef"],
++  ["tokyo-night", "Tokyo Night", "#1a1b26", "#7aa2f7"],
++  ["gruvbox-dark", "Gruvbox Dark", "#282828", "#d79921"],
++  ["nord", "Nord", "#2e3440", "#88c0d0"],
++  ["github-dark", "GitHub Dark", "#0d1117", "#58a6ff"],
++  ["material-theme-palenight", "Material Palenight", "#292d3e", "#c792ea"],
++  ["rose-pine", "Rosé Pine", "#191724", "#c4a7e7"],
++  ["kanagawa-dragon", "Kanagawa Dragon", "#181616", "#c4b28a"],
++  ["everforest-dark", "Everforest Dark", "#2d353b", "#a7c080"],
++  ["monokai", "Monokai", "#272822", "#a6e22e"],
++  ["vitesse-dark", "Vitesse Dark", "#121212", "#4d9375"],
++  ["solarized-dark", "Solarized Dark", "#002b36", "#268bd2"],
++  ["synthwave-84", "SynthWave '84", "#262335", "#ff7edb"],
++] as const;
++
++/** Keep the original Claudex palettes valid after the theme-library migration. */
++export const CLAUDEX_THEMES: ReadonlyArray<ThemeDefinition> = CLAUDEX_THEME_SPECS.map(
++  ([id, label, background, accent]) => ({
++    id,
++    label,
++    appearance: "dark" as const,
++    colors: createManagedThemeColors("dark", background, accent, { exactSeeds: true }),
++  }),
++);
++
+ const BUILT_IN_THEME_DEFINITIONS: ReadonlyArray<ThemeDefinition> = [
+   T3_CHAT_THEME,
+   GROVE_THEME,
+   OCEAN_THEME,
+   EMBER_THEME,
+   IRIS_THEME,
++  ...CLAUDEX_THEMES,
+ ];
+ 
+ export function getThemeDefinition(theme: ThemePreference): ThemeDefinition | null {
+diff --git a/docs/internals/providers.md b/docs/internals/providers.md
+index a309d70f03ded9aeff28adf4372725cbaa3a51ce..42a8bd8ab192e613074ccc015b517fb14540ca16 100644
+--- a/docs/internals/providers.md
++++ b/docs/internals/providers.md
+@@ -7,7 +7,7 @@ orchestration layer does not know which one is behind a thread.
+ 
+ ## Built-in drivers
+ 
+-[`builtInDrivers.ts`][drivers] exports `BUILT_IN_DRIVERS` with five entries:
++[`builtInDrivers.ts`][drivers] exports `BUILT_IN_DRIVERS` with seven entries:
+ 
+ | Driver kind   | Driver source                           |
+ | ------------- | --------------------------------------- |
+@@ -16,6 +16,8 @@ orchestration layer does not know which one is behind a thread.
+ | `cursor`      | [`Drivers/CursorDriver.ts`][cursor]     |
+ | `grok`        | [`Drivers/GrokDriver.ts`][grok]         |
+ | `opencode`    | [`Drivers/OpenCodeDriver.ts`][opencode] |
++| `pi`          | [`Drivers/PiDriver.ts`][pi]             |
++| `primeAgent`  | [`Drivers/PrimeAgentDriver.ts`][prime]  |
+ 
+ Each driver declares its `driverKind`, a `configSchema`, and a `create` function that builds an
+ adapter in a child scope. Adapter implementations live beside them in
+@@ -81,6 +83,8 @@ when a request opens (approval) or user input is requested, via
+ [cursor]: ../../apps/server/src/provider/Drivers/CursorDriver.ts
+ [grok]: ../../apps/server/src/provider/Drivers/GrokDriver.ts
+ [opencode]: ../../apps/server/src/provider/Drivers/OpenCodeDriver.ts
++[pi]: ../../apps/server/src/provider/Drivers/PiDriver.ts
++[prime]: ../../apps/server/src/provider/Drivers/PrimeAgentDriver.ts
+ [adapter]: ../../apps/server/src/provider/Services/ProviderAdapter.ts
+ [instances]: ../../apps/server/src/provider/Services/ProviderInstanceRegistry.ts
+ [registry]: ../../apps/server/src/provider/Services/ProviderAdapterRegistry.ts
+diff --git a/packages/contracts/src/model.ts b/packages/contracts/src/model.ts
+index 9fcd0d266dd627a22253660450090457edf57efb..80f14aafc808ad6fcee2edacba978631769025ee 100644
+--- a/packages/contracts/src/model.ts
++++ b/packages/contracts/src/model.ts
+@@ -4,6 +4,24 @@ import * as SchemaTransformation from "effect/SchemaTransformation";
+ import { TrimmedNonEmptyString } from "./baseSchemas.ts";
+ import { ProviderDriverKind } from "./providerInstance.ts";
+ 
++/** Thinking levels accepted by Pi's RPC `set_thinking_level` command. */
++export const PI_THINKING_LEVEL_OPTIONS = [
++  "off",
++  "minimal",
++  "low",
++  "medium",
++  "high",
++  "xhigh",
++  "max",
++] as const;
++export type PiThinkingLevel = (typeof PI_THINKING_LEVEL_OPTIONS)[number];
++
++export function normalizePiThinkingLevel(value: string | null | undefined): PiThinkingLevel | null {
++  return PI_THINKING_LEVEL_OPTIONS.includes(value as PiThinkingLevel)
++    ? (value as PiThinkingLevel)
++    : null;
++}
++
+ export const ProviderOptionDescriptorType = Schema.Literals(["select", "boolean"]);
+ export type ProviderOptionDescriptorType = typeof ProviderOptionDescriptorType.Type;
+ 
+@@ -132,6 +150,9 @@ const CLAUDE_DRIVER_KIND = ProviderDriverKind.make("claudeAgent");
+ const CURSOR_DRIVER_KIND = ProviderDriverKind.make("cursor");
+ const GROK_DRIVER_KIND = ProviderDriverKind.make("grok");
+ const OPENCODE_DRIVER_KIND = ProviderDriverKind.make("opencode");
++const PI_DRIVER_KIND = ProviderDriverKind.make("pi");
++const PRIME_AGENT_DRIVER_KIND = ProviderDriverKind.make("primeAgent");
++const ANTIGRAVITY_DRIVER_KIND = ProviderDriverKind.make("antigravity");
+ 
+ export const DEFAULT_MODEL = "gpt-5.6-sol";
+ 
+@@ -153,6 +174,9 @@ export const DEFAULT_MODEL_BY_PROVIDER: Partial<Record<ProviderDriverKind, strin
+   [CURSOR_DRIVER_KIND]: "auto",
+   [GROK_DRIVER_KIND]: "grok-build",
+   [OPENCODE_DRIVER_KIND]: "openai/gpt-5",
++  [PI_DRIVER_KIND]: undefined,
++  [PRIME_AGENT_DRIVER_KIND]: undefined,
++  [ANTIGRAVITY_DRIVER_KIND]: "gemini-3.6-flash-high",
+ };
+ 
+ /** Per-provider text generation model defaults. */
+@@ -163,6 +187,9 @@ export const DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER: Partial<
+   [CLAUDE_DRIVER_KIND]: "claude-haiku-4-5",
+   [CURSOR_DRIVER_KIND]: "composer-2",
+   [OPENCODE_DRIVER_KIND]: "openai/gpt-5",
++  [PI_DRIVER_KIND]: undefined,
++  [PRIME_AGENT_DRIVER_KIND]: undefined,
++  [ANTIGRAVITY_DRIVER_KIND]: "gemini-3.6-flash-high",
+ };
+ 
+ export const MODEL_SLUG_ALIASES_BY_PROVIDER: Partial<
+@@ -212,6 +239,9 @@ export const MODEL_SLUG_ALIASES_BY_PROVIDER: Partial<
+     "opus-4.5": "claude-opus-4-5",
+   },
+   [OPENCODE_DRIVER_KIND]: {},
++  [PI_DRIVER_KIND]: {},
++  [PRIME_AGENT_DRIVER_KIND]: {},
++  [ANTIGRAVITY_DRIVER_KIND]: {},
+ };
+ 
+ // ── Provider display names ────────────────────────────────────────────
+@@ -222,4 +252,7 @@ export const PROVIDER_DISPLAY_NAMES: Partial<Record<ProviderDriverKind, string>>
+   [CURSOR_DRIVER_KIND]: "Cursor",
+   [GROK_DRIVER_KIND]: "Grok",
+   [OPENCODE_DRIVER_KIND]: "OpenCode",
++  [PI_DRIVER_KIND]: "Pi",
++  [PRIME_AGENT_DRIVER_KIND]: "Prime Agent",
++  [ANTIGRAVITY_DRIVER_KIND]: "Antigravity",
+ };
+diff --git a/packages/contracts/src/settings.test.ts b/packages/contracts/src/settings.test.ts
+index 46705837afa4a4ab15c53f89adbb99c1dde96b86..b5cb53820ec011096661cd3e222c6265c700dcf4 100644
+--- a/packages/contracts/src/settings.test.ts
++++ b/packages/contracts/src/settings.test.ts
+@@ -167,6 +167,42 @@ describe("ServerSettings.providerInstances (slice-2 invariant)", () => {
+   });
+ });
+ 
++describe("Pi provider settings", () => {
++  it("keeps custom Pi provider/model slugs in the hidden legacy settings shape", () => {
++    const settings = decodeServerSettings({
++      providers: {
++        pi: { customModels: ["openai/gpt-5", "anthropic/claude-sonnet"] },
++      },
++    });
++    expect(settings.providers.pi.customModels).toEqual(["openai/gpt-5", "anthropic/claude-sonnet"]);
++    expect(decodeServerSettings({}).providers.pi.customModels).toEqual([]);
++    expect(
++      decodeServerSettingsPatch({
++        providers: { pi: { customModels: ["google/gemini-2.5-pro"] } },
++      }).providers?.pi?.customModels,
++    ).toEqual(["google/gemini-2.5-pro"]);
++  });
++});
++
++describe("Prime Agent provider settings", () => {
++  it("defaults to the documented binary and keeps custom models hidden", () => {
++    const settings = decodeServerSettings({
++      providers: { primeAgent: { customModels: ["openai/gpt-5"] } },
++    });
++    expect(settings.providers.primeAgent.binaryPath).toBe("prime-agent");
++    expect(settings.providers.primeAgent.agentDir).toBe("");
++    expect(settings.providers.primeAgent.customModels).toEqual(["openai/gpt-5"]);
++  });
++
++  it("accepts partial updates through the provider-specific patch shape", () => {
++    expect(
++      decodeServerSettingsPatch({
++        providers: { primeAgent: { binaryPath: "~/bin/prime-agent", agentDir: "~/.prime" } },
++      }).providers?.primeAgent,
++    ).toEqual({ binaryPath: "~/bin/prime-agent", agentDir: "~/.prime" });
++  });
++});
++
+ describe("ServerSettings worktree defaults", () => {
+   it("defaults start-from-origin on for legacy configs", () => {
+     expect(decodeServerSettings({}).newWorktreesStartFromOrigin).toBe(true);
+diff --git a/packages/contracts/src/settings.ts b/packages/contracts/src/settings.ts
+index 388205649c85d92663d6d73d7cbc8e44cf140617..fbc0f385b528f10ce282244be2637afb8a023475 100644
+--- a/packages/contracts/src/settings.ts
++++ b/packages/contracts/src/settings.ts
+@@ -471,6 +471,88 @@ export const OpenCodeSettings = makeProviderSettingsSchema(
+ );
+ export type OpenCodeSettings = typeof OpenCodeSettings.Type;
+ 
++export const PiSettings = makeProviderSettingsSchema(
++  {
++    enabled: Schema.Boolean.pipe(
++      Schema.withDecodingDefault(Effect.succeed(true)),
++      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
++    ),
++    binaryPath: makeBinaryPathSetting("pi").pipe(
++      Schema.annotateKey({
++        title: "Binary path",
++        description: "Path to the Pi binary.",
++        providerSettingsForm: { placeholder: "pi", clearWhenEmpty: "omit" },
++      }),
++    ),
++    agentDir: TrimmedString.pipe(
++      Schema.withDecodingDefault(Effect.succeed("")),
++      Schema.annotateKey({
++        title: "Agent directory",
++        description: "Optional Pi session directory used for persisted sessions.",
++        providerSettingsForm: { placeholder: "~/.pi/agent", clearWhenEmpty: "omit" },
++      }),
++    ),
++    customModels: Schema.Array(Schema.String).pipe(
++      Schema.withDecodingDefault(Effect.succeed([])),
++      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
++    ),
++  },
++  { order: ["binaryPath", "agentDir"] },
++);
++export type PiSettings = typeof PiSettings.Type;
++
++export const PrimeAgentSettings = makeProviderSettingsSchema(
++  {
++    enabled: Schema.Boolean.pipe(
++      Schema.withDecodingDefault(Effect.succeed(true)),
++      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
++    ),
++    binaryPath: makeBinaryPathSetting("prime-agent").pipe(
++      Schema.annotateKey({
++        title: "Binary path",
++        description: "Path to the Prime Agent binary.",
++        providerSettingsForm: { placeholder: "prime-agent", clearWhenEmpty: "omit" },
++      }),
++    ),
++    agentDir: TrimmedString.pipe(
++      Schema.withDecodingDefault(Effect.succeed("")),
++      Schema.annotateKey({
++        title: "Session directory",
++        description: "Optional Prime Agent session directory used for persisted sessions.",
++        providerSettingsForm: { placeholder: "~/.prime-agent", clearWhenEmpty: "omit" },
++      }),
++    ),
++    customModels: Schema.Array(Schema.String).pipe(
++      Schema.withDecodingDefault(Effect.succeed([])),
++      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
++    ),
++  },
++  { order: ["binaryPath", "agentDir"] },
++);
++export type PrimeAgentSettings = typeof PrimeAgentSettings.Type;
++
++export const AntigravitySettings = makeProviderSettingsSchema(
++  {
++    enabled: Schema.Boolean.pipe(
++      Schema.withDecodingDefault(Effect.succeed(true)),
++      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
++    ),
++    binaryPath: makeBinaryPathSetting("agy-direct").pipe(
++      Schema.annotateKey({
++        title: "Binary path",
++        description: "Path to the Antigravity CLI binary.",
++        providerSettingsForm: { placeholder: "agy-direct", clearWhenEmpty: "omit" },
++      }),
++    ),
++    customModels: Schema.Array(Schema.String).pipe(
++      Schema.withDecodingDefault(Effect.succeed([])),
++      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
++    ),
++  },
++  { order: ["binaryPath"] },
++);
++export type AntigravitySettings = typeof AntigravitySettings.Type;
++
+ export const ObservabilitySettings = Schema.Struct({
+   otlpTracesUrl: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+   otlpMetricsUrl: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+@@ -601,6 +683,9 @@ export const ServerSettings = Schema.Struct({
+     cursor: CursorSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+     grok: GrokSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+     opencode: OpenCodeSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
++    pi: PiSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
++    primeAgent: PrimeAgentSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
++    antigravity: AntigravitySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+   }).pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+   // New driver-agnostic instance map. Keyed by `ProviderInstanceId`; values
+   // are `ProviderInstanceConfig` envelopes. The driver-specific config blob
+@@ -704,6 +789,26 @@ const OpenCodeSettingsPatch = Schema.Struct({
+   customModels: Schema.optionalKey(Schema.Array(Schema.String)),
+ });
+ 
++const PiSettingsPatch = Schema.Struct({
++  enabled: Schema.optionalKey(Schema.Boolean),
++  binaryPath: Schema.optionalKey(TrimmedString),
++  agentDir: Schema.optionalKey(TrimmedString),
++  customModels: Schema.optionalKey(Schema.Array(Schema.String)),
++});
++
++const PrimeAgentSettingsPatch = Schema.Struct({
++  enabled: Schema.optionalKey(Schema.Boolean),
++  binaryPath: Schema.optionalKey(TrimmedString),
++  agentDir: Schema.optionalKey(TrimmedString),
++  customModels: Schema.optionalKey(Schema.Array(Schema.String)),
++});
++
++const AntigravitySettingsPatch = Schema.Struct({
++  enabled: Schema.optionalKey(Schema.Boolean),
++  binaryPath: Schema.optionalKey(TrimmedString),
++  customModels: Schema.optionalKey(Schema.Array(Schema.String)),
++});
++
+ export const ServerSettingsPatch = Schema.Struct({
+   // Server settings
+   enableLegacyTokenStreaming: Schema.optionalKey(Schema.Boolean),
+@@ -744,6 +849,9 @@ export const ServerSettingsPatch = Schema.Struct({
+       cursor: Schema.optionalKey(CursorSettingsPatch),
+       grok: Schema.optionalKey(GrokSettingsPatch),
+       opencode: Schema.optionalKey(OpenCodeSettingsPatch),
++      pi: Schema.optionalKey(PiSettingsPatch),
++      primeAgent: Schema.optionalKey(PrimeAgentSettingsPatch),
++      antigravity: Schema.optionalKey(AntigravitySettingsPatch),
+     }),
+   ),
+   // Whole-map replacement for the new instance config. Patching individual
