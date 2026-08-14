@@ -1663,17 +1663,20 @@ index 0000000000000000000000000000000000000000..5f93de732cdcbf8b1d68a3da18430211
 +  makeAgentAdapter({ ...options, provider: ProviderDriverKind.make("pi"), providerName: "Pi" });
 diff --git a/apps/server/src/provider/antigravityRuntime.test.ts b/apps/server/src/provider/antigravityRuntime.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..cccc342aee428eb3e6ff568fd66417e59a325373
+index 0000000000000000000000000000000000000000..d8162652063877bad28913cae178e782f4b31c54
 --- /dev/null
 +++ b/apps/server/src/provider/antigravityRuntime.test.ts
-@@ -0,0 +1,151 @@
+@@ -0,0 +1,210 @@
 +import * as Effect from "effect/Effect";
++import * as PlatformError from "effect/PlatformError";
 +import * as Sink from "effect/Sink";
 +import * as Stream from "effect/Stream";
++import * as Duration from "effect/Duration";
 +import { ChildProcessSpawner } from "effect/unstable/process";
 +import { describe, expect, it } from "vite-plus/test";
 +
 +import {
++  ANTIGRAVITY_MODELS_TIMEOUT,
 +  ANTIGRAVITY_FALLBACK_MODELS,
 +  discoverAntigravityModels,
 +  markAntigravityDefaultModel,
@@ -1683,28 +1686,34 @@ index 0000000000000000000000000000000000000000..cccc342aee428eb3e6ff568fd66417e5
 +const makeSpawner = (
 +  stdout: string,
 +  code = 0,
-+  seenCommand?: { command?: unknown },
++  seenCommand?: { command?: unknown; options?: unknown },
++  exitCode: Effect.Effect<ChildProcessSpawner.ExitCode> = Effect.succeed(
++    ChildProcessSpawner.ExitCode(code),
++  ),
++  spawnError?: PlatformError.PlatformError,
 +): ChildProcessSpawner.ChildProcessSpawner["Service"] =>
-+  ChildProcessSpawner.make(
-+    (command) => (
-+      seenCommand ? (seenCommand.command = command) : undefined,
-+      Effect.succeed(
-+        ChildProcessSpawner.makeHandle({
-+          pid: ChildProcessSpawner.ProcessId(1),
-+          exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(code)),
-+          isRunning: Effect.succeed(false),
-+          kill: () => Effect.void,
-+          unref: Effect.succeed(Effect.void),
-+          stdin: Sink.drain,
-+          stdout: Stream.encodeText(Stream.make(stdout)),
-+          stderr: Stream.empty,
-+          all: Stream.empty,
-+          getInputFd: () => Sink.drain,
-+          getOutputFd: () => Stream.empty,
-+        }),
-+      )
-+    ),
-+  );
++  ChildProcessSpawner.make((command) => {
++    if (seenCommand) {
++      seenCommand.command = command;
++      seenCommand.options = command.options;
++    }
++    if (spawnError) return Effect.fail(spawnError);
++    return Effect.succeed(
++      ChildProcessSpawner.makeHandle({
++        pid: ChildProcessSpawner.ProcessId(1),
++        exitCode,
++        isRunning: Effect.succeed(false),
++        kill: () => Effect.void,
++        unref: Effect.succeed(Effect.void),
++        stdin: Sink.drain,
++        stdout: Stream.encodeText(Stream.make(stdout)),
++        stderr: Stream.empty,
++        all: Stream.empty,
++        getInputFd: () => Sink.drain,
++        getOutputFd: () => Stream.empty,
++      }),
++    );
++  });
 +
 +describe("Antigravity model discovery", () => {
 +  it("parses tab-separated model slugs and display names", () => {
@@ -1784,7 +1793,7 @@ index 0000000000000000000000000000000000000000..cccc342aee428eb3e6ff568fd66417e5
 +  it("invokes the configured binary with models", async () => {
 +    await Effect.runPromise(
 +      Effect.gen(function* () {
-+        const seenCommand: { command?: unknown } = {};
++        const seenCommand: { command?: unknown; options?: unknown } = {};
 +        const discovery = yield* discoverAntigravityModels("/tmp/configured-agy", {
 +          AGY_TEST: "yes",
 +        }).pipe(
@@ -1797,6 +1806,7 @@ index 0000000000000000000000000000000000000000..cccc342aee428eb3e6ff568fd66417e5
 +          command: "/tmp/configured-agy",
 +          args: ["models"],
 +        });
++        expect(seenCommand.options).toMatchObject({ forceKillAfter: expect.anything() });
 +        expect(discovery.installed).toBe(true);
 +        expect(discovery.models[0]?.slug).toBe("gemini-3.7-flash-high");
 +      }),
@@ -1817,23 +1827,74 @@ index 0000000000000000000000000000000000000000..cccc342aee428eb3e6ff568fd66417e5
 +      ),
 +    );
 +  });
++
++  it("falls back after a bounded discovery timeout", async () => {
++    expect(Duration.toMillis(ANTIGRAVITY_MODELS_TIMEOUT)).toBe(15_000);
++    await Effect.runPromise(
++      discoverAntigravityModels("/tmp/configured-agy", process.env, Duration.millis(10)).pipe(
++        Effect.provideService(
++          ChildProcessSpawner.ChildProcessSpawner,
++          makeSpawner("", 0, undefined, Effect.never),
++        ),
++        Effect.tap((discovery) =>
++          Effect.sync(() => {
++            expect(discovery).toEqual({
++              models: ANTIGRAVITY_FALLBACK_MODELS,
++              installed: true,
++              message: "/tmp/configured-agy models timed out after 10ms.",
++            });
++          }),
++        ),
++      ),
++    );
++  });
++
++  it("marks a missing command as not installed", async () => {
++    await Effect.runPromise(
++      discoverAntigravityModels("missing-agy").pipe(
++        Effect.provideService(
++          ChildProcessSpawner.ChildProcessSpawner,
++          makeSpawner(
++            "",
++            0,
++            undefined,
++            undefined,
++            PlatformError.systemError({
++              _tag: "NotFound",
++              module: "test",
++              method: "spawn",
++              description: "missing test command",
++            }),
++          ),
++        ),
++        Effect.tap((discovery) =>
++          Effect.sync(() => {
++            expect(discovery.installed).toBe(false);
++            expect(discovery.message).toContain("command was not found");
++          }),
++        ),
++      ),
++    );
++  });
 +});
 diff --git a/apps/server/src/provider/antigravityRuntime.ts b/apps/server/src/provider/antigravityRuntime.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..3b8e6c6bc34d7f3c880a931bab7b4de287a8270d
+index 0000000000000000000000000000000000000000..4059c494cb9da046f051a7bedf01180135a70ed8
 --- /dev/null
 +++ b/apps/server/src/provider/antigravityRuntime.ts
-@@ -0,0 +1,115 @@
+@@ -0,0 +1,138 @@
 +import type { ModelCapabilities, ServerProviderModel } from "@t3tools/contracts";
++import * as Cause from "effect/Cause";
 +import * as Duration from "effect/Duration";
 +import * as Effect from "effect/Effect";
 +import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 +import { createModelCapabilities } from "@t3tools/shared/model";
 +import { resolveSpawnCommand } from "@t3tools/shared/shell";
-+import { spawnAndCollect } from "./providerSnapshot.ts";
++import { isCommandMissingCause, spawnAndCollect } from "./providerSnapshot.ts";
 +
 +const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({ optionDescriptors: [] });
-+const ANTIGRAVITY_MODELS_TIMEOUT = Duration.seconds(4);
++export const ANTIGRAVITY_MODELS_TIMEOUT = Duration.seconds(15);
++const ANTIGRAVITY_FORCE_KILL_AFTER = Duration.seconds(1);
 +
 +const ANTIGRAVITY_FALLBACK_CATALOG: ReadonlyArray<ServerProviderModel> = [
 +  {
@@ -1860,6 +1921,29 @@ index 0000000000000000000000000000000000000000..3b8e6c6bc34d7f3c880a931bab7b4de2
 +  readonly models: ReadonlyArray<ServerProviderModel>;
 +  readonly installed: boolean;
 +  readonly message?: string;
++}
++
++function discoveryFallback(
++  command: string,
++  timeout: Duration.Duration,
++  error: unknown,
++): AntigravityModelDiscovery {
++  if (Cause.isTimeoutError(error)) {
++    return {
++      models: ANTIGRAVITY_FALLBACK_MODELS,
++      installed: true,
++      message: `${command} models timed out after ${Duration.toMillis(timeout)}ms.`,
++    };
++  }
++
++  const commandMissing = isCommandMissingCause(error);
++  return {
++    models: ANTIGRAVITY_FALLBACK_MODELS,
++    installed: !commandMissing,
++    message: commandMissing
++      ? `${command} models could not be started because the command was not found.`
++      : `${command} models could not be started.`,
++  };
 +}
 +
 +export function markAntigravityDefaultModel(
@@ -1897,6 +1981,7 @@ index 0000000000000000000000000000000000000000..3b8e6c6bc34d7f3c880a931bab7b4de2
 +export function discoverAntigravityModels(
 +  binaryPath: string | undefined,
 +  environment: NodeJS.ProcessEnv = process.env,
++  timeout: Duration.Duration = ANTIGRAVITY_MODELS_TIMEOUT,
 +): Effect.Effect<AntigravityModelDiscovery, never, ChildProcessSpawner.ChildProcessSpawner> {
 +  const command = binaryPath?.trim() || "agy-direct";
 +  return Effect.gen(function* () {
@@ -1909,6 +1994,7 @@ index 0000000000000000000000000000000000000000..3b8e6c6bc34d7f3c880a931bab7b4de2
 +      ChildProcess.make(spawnCommand.command, spawnCommand.args, {
 +        env: effectiveEnvironment,
 +        shell: spawnCommand.shell,
++        forceKillAfter: ANTIGRAVITY_FORCE_KILL_AFTER,
 +      }),
 +    );
 +    const models = result.code === 0 ? parseAntigravityModels(result.stdout) : [];
@@ -1931,12 +2017,8 @@ index 0000000000000000000000000000000000000000..3b8e6c6bc34d7f3c880a931bab7b4de2
 +      installed: true,
 +    } satisfies AntigravityModelDiscovery;
 +  }).pipe(
-+    Effect.timeout(ANTIGRAVITY_MODELS_TIMEOUT),
-+    Effect.orElseSucceed(() => ({
-+      models: ANTIGRAVITY_FALLBACK_MODELS,
-+      installed: false,
-+      message: `${command} models could not be started or timed out.`,
-+    })),
++    Effect.timeout(timeout),
++    Effect.catch((error) => Effect.succeed(discoveryFallback(command, timeout, error))),
 +  );
 +}
 diff --git a/apps/server/src/provider/builtInDrivers.test.ts b/apps/server/src/provider/builtInDrivers.test.ts

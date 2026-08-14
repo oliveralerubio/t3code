@@ -1,13 +1,15 @@
 import type { ModelCapabilities, ServerProviderModel } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import { createModelCapabilities } from "@t3tools/shared/model";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
-import { spawnAndCollect } from "./providerSnapshot.ts";
+import { isCommandMissingCause, spawnAndCollect } from "./providerSnapshot.ts";
 
 const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({ optionDescriptors: [] });
-const ANTIGRAVITY_MODELS_TIMEOUT = Duration.seconds(4);
+export const ANTIGRAVITY_MODELS_TIMEOUT = Duration.seconds(15);
+const ANTIGRAVITY_FORCE_KILL_AFTER = Duration.seconds(1);
 
 const ANTIGRAVITY_FALLBACK_CATALOG: ReadonlyArray<ServerProviderModel> = [
   {
@@ -34,6 +36,29 @@ export interface AntigravityModelDiscovery {
   readonly models: ReadonlyArray<ServerProviderModel>;
   readonly installed: boolean;
   readonly message?: string;
+}
+
+function discoveryFallback(
+  command: string,
+  timeout: Duration.Duration,
+  error: unknown,
+): AntigravityModelDiscovery {
+  if (Cause.isTimeoutError(error)) {
+    return {
+      models: ANTIGRAVITY_FALLBACK_MODELS,
+      installed: true,
+      message: `${command} models timed out after ${Duration.toMillis(timeout)}ms.`,
+    };
+  }
+
+  const commandMissing = isCommandMissingCause(error);
+  return {
+    models: ANTIGRAVITY_FALLBACK_MODELS,
+    installed: !commandMissing,
+    message: commandMissing
+      ? `${command} models could not be started because the command was not found.`
+      : `${command} models could not be started.`,
+  };
 }
 
 export function markAntigravityDefaultModel(
@@ -71,6 +96,7 @@ export function parseAntigravityModels(output: string): ReadonlyArray<ServerProv
 export function discoverAntigravityModels(
   binaryPath: string | undefined,
   environment: NodeJS.ProcessEnv = process.env,
+  timeout: Duration.Duration = ANTIGRAVITY_MODELS_TIMEOUT,
 ): Effect.Effect<AntigravityModelDiscovery, never, ChildProcessSpawner.ChildProcessSpawner> {
   const command = binaryPath?.trim() || "agy-direct";
   return Effect.gen(function* () {
@@ -83,6 +109,7 @@ export function discoverAntigravityModels(
       ChildProcess.make(spawnCommand.command, spawnCommand.args, {
         env: effectiveEnvironment,
         shell: spawnCommand.shell,
+        forceKillAfter: ANTIGRAVITY_FORCE_KILL_AFTER,
       }),
     );
     const models = result.code === 0 ? parseAntigravityModels(result.stdout) : [];
@@ -105,11 +132,7 @@ export function discoverAntigravityModels(
       installed: true,
     } satisfies AntigravityModelDiscovery;
   }).pipe(
-    Effect.timeout(ANTIGRAVITY_MODELS_TIMEOUT),
-    Effect.orElseSucceed(() => ({
-      models: ANTIGRAVITY_FALLBACK_MODELS,
-      installed: false,
-      message: `${command} models could not be started or timed out.`,
-    })),
+    Effect.timeout(timeout),
+    Effect.catch((error) => Effect.succeed(discoveryFallback(command, timeout, error))),
   );
 }

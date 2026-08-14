@@ -3,5 +3,5 @@
   "upstreamRef": "v0.0.33",
   "upstreamCommit": "3b72d17cbca691f0b64e6d4a10c9e349f42873a5",
   "patch": "overlay-v0.0.33.patch",
-  "patchSha256": "bf6f24f06954350af63b3d92c6fe07638ae63a53d97840787a9d1e3b02c91bf0"
+  "patchSha256": "e661c8050d036388474e29234a35394108c8d96592bdf54bb9a86ed31ace08ff"
 }

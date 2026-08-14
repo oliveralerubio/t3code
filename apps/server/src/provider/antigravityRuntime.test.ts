@@ -1,10 +1,13 @@
 import * as Effect from "effect/Effect";
+import * as PlatformError from "effect/PlatformError";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
+import * as Duration from "effect/Duration";
 import { ChildProcessSpawner } from "effect/unstable/process";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  ANTIGRAVITY_MODELS_TIMEOUT,
   ANTIGRAVITY_FALLBACK_MODELS,
   discoverAntigravityModels,
   markAntigravityDefaultModel,
@@ -14,28 +17,34 @@ import {
 const makeSpawner = (
   stdout: string,
   code = 0,
-  seenCommand?: { command?: unknown },
+  seenCommand?: { command?: unknown; options?: unknown },
+  exitCode: Effect.Effect<ChildProcessSpawner.ExitCode> = Effect.succeed(
+    ChildProcessSpawner.ExitCode(code),
+  ),
+  spawnError?: PlatformError.PlatformError,
 ): ChildProcessSpawner.ChildProcessSpawner["Service"] =>
-  ChildProcessSpawner.make(
-    (command) => (
-      seenCommand ? (seenCommand.command = command) : undefined,
-      Effect.succeed(
-        ChildProcessSpawner.makeHandle({
-          pid: ChildProcessSpawner.ProcessId(1),
-          exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(code)),
-          isRunning: Effect.succeed(false),
-          kill: () => Effect.void,
-          unref: Effect.succeed(Effect.void),
-          stdin: Sink.drain,
-          stdout: Stream.encodeText(Stream.make(stdout)),
-          stderr: Stream.empty,
-          all: Stream.empty,
-          getInputFd: () => Sink.drain,
-          getOutputFd: () => Stream.empty,
-        }),
-      )
-    ),
-  );
+  ChildProcessSpawner.make((command) => {
+    if (seenCommand) {
+      seenCommand.command = command;
+      seenCommand.options = command.options;
+    }
+    if (spawnError) return Effect.fail(spawnError);
+    return Effect.succeed(
+      ChildProcessSpawner.makeHandle({
+        pid: ChildProcessSpawner.ProcessId(1),
+        exitCode,
+        isRunning: Effect.succeed(false),
+        kill: () => Effect.void,
+        unref: Effect.succeed(Effect.void),
+        stdin: Sink.drain,
+        stdout: Stream.encodeText(Stream.make(stdout)),
+        stderr: Stream.empty,
+        all: Stream.empty,
+        getInputFd: () => Sink.drain,
+        getOutputFd: () => Stream.empty,
+      }),
+    );
+  });
 
 describe("Antigravity model discovery", () => {
   it("parses tab-separated model slugs and display names", () => {
@@ -115,7 +124,7 @@ describe("Antigravity model discovery", () => {
   it("invokes the configured binary with models", async () => {
     await Effect.runPromise(
       Effect.gen(function* () {
-        const seenCommand: { command?: unknown } = {};
+        const seenCommand: { command?: unknown; options?: unknown } = {};
         const discovery = yield* discoverAntigravityModels("/tmp/configured-agy", {
           AGY_TEST: "yes",
         }).pipe(
@@ -128,6 +137,7 @@ describe("Antigravity model discovery", () => {
           command: "/tmp/configured-agy",
           args: ["models"],
         });
+        expect(seenCommand.options).toMatchObject({ forceKillAfter: expect.anything() });
         expect(discovery.installed).toBe(true);
         expect(discovery.models[0]?.slug).toBe("gemini-3.7-flash-high");
       }),
@@ -143,6 +153,55 @@ describe("Antigravity model discovery", () => {
             expect(discovery.installed).toBe(true);
             expect(discovery.models).toEqual(ANTIGRAVITY_FALLBACK_MODELS);
             expect(discovery.message).toContain("exited with code 1");
+          }),
+        ),
+      ),
+    );
+  });
+
+  it("falls back after a bounded discovery timeout", async () => {
+    expect(Duration.toMillis(ANTIGRAVITY_MODELS_TIMEOUT)).toBe(15_000);
+    await Effect.runPromise(
+      discoverAntigravityModels("/tmp/configured-agy", process.env, Duration.millis(10)).pipe(
+        Effect.provideService(
+          ChildProcessSpawner.ChildProcessSpawner,
+          makeSpawner("", 0, undefined, Effect.never),
+        ),
+        Effect.tap((discovery) =>
+          Effect.sync(() => {
+            expect(discovery).toEqual({
+              models: ANTIGRAVITY_FALLBACK_MODELS,
+              installed: true,
+              message: "/tmp/configured-agy models timed out after 10ms.",
+            });
+          }),
+        ),
+      ),
+    );
+  });
+
+  it("marks a missing command as not installed", async () => {
+    await Effect.runPromise(
+      discoverAntigravityModels("missing-agy").pipe(
+        Effect.provideService(
+          ChildProcessSpawner.ChildProcessSpawner,
+          makeSpawner(
+            "",
+            0,
+            undefined,
+            undefined,
+            PlatformError.systemError({
+              _tag: "NotFound",
+              module: "test",
+              method: "spawn",
+              description: "missing test command",
+            }),
+          ),
+        ),
+        Effect.tap((discovery) =>
+          Effect.sync(() => {
+            expect(discovery.installed).toBe(false);
+            expect(discovery.message).toContain("command was not found");
           }),
         ),
       ),
