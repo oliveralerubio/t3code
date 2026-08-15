@@ -109,6 +109,7 @@ export function discoverAntigravityModels(
       ChildProcess.make(spawnCommand.command, spawnCommand.args, {
         env: effectiveEnvironment,
         shell: spawnCommand.shell,
+        stdin: "ignore",
         forceKillAfter: ANTIGRAVITY_FORCE_KILL_AFTER,
       }),
     );

@@ -1663,10 +1663,10 @@ index 0000000000000000000000000000000000000000..5f93de732cdcbf8b1d68a3da18430211
 +  makeAgentAdapter({ ...options, provider: ProviderDriverKind.make("pi"), providerName: "Pi" });
 diff --git a/apps/server/src/provider/antigravityRuntime.test.ts b/apps/server/src/provider/antigravityRuntime.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..d8162652063877bad28913cae178e782f4b31c54
+index 0000000000000000000000000000000000000000..9d2dab3935c5934437adc385dc3b0b7f8e22a596
 --- /dev/null
 +++ b/apps/server/src/provider/antigravityRuntime.test.ts
-@@ -0,0 +1,210 @@
+@@ -0,0 +1,213 @@
 +import * as Effect from "effect/Effect";
 +import * as PlatformError from "effect/PlatformError";
 +import * as Sink from "effect/Sink";
@@ -1806,7 +1806,10 @@ index 0000000000000000000000000000000000000000..d8162652063877bad28913cae178e782
 +          command: "/tmp/configured-agy",
 +          args: ["models"],
 +        });
-+        expect(seenCommand.options).toMatchObject({ forceKillAfter: expect.anything() });
++        expect(seenCommand.options).toMatchObject({
++          stdin: "ignore",
++          forceKillAfter: expect.anything(),
++        });
 +        expect(discovery.installed).toBe(true);
 +        expect(discovery.models[0]?.slug).toBe("gemini-3.7-flash-high");
 +      }),
@@ -1879,10 +1882,10 @@ index 0000000000000000000000000000000000000000..d8162652063877bad28913cae178e782
 +});
 diff --git a/apps/server/src/provider/antigravityRuntime.ts b/apps/server/src/provider/antigravityRuntime.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..4059c494cb9da046f051a7bedf01180135a70ed8
+index 0000000000000000000000000000000000000000..80940aa9fdac0d65cf85f03f71aa86e11379f7ef
 --- /dev/null
 +++ b/apps/server/src/provider/antigravityRuntime.ts
-@@ -0,0 +1,138 @@
+@@ -0,0 +1,139 @@
 +import type { ModelCapabilities, ServerProviderModel } from "@t3tools/contracts";
 +import * as Cause from "effect/Cause";
 +import * as Duration from "effect/Duration";
@@ -1994,6 +1997,7 @@ index 0000000000000000000000000000000000000000..4059c494cb9da046f051a7bedf011801
 +      ChildProcess.make(spawnCommand.command, spawnCommand.args, {
 +        env: effectiveEnvironment,
 +        shell: spawnCommand.shell,
++        stdin: "ignore",
 +        forceKillAfter: ANTIGRAVITY_FORCE_KILL_AFTER,
 +      }),
 +    );

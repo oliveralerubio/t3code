@@ -137,7 +137,10 @@ describe("Antigravity model discovery", () => {
           command: "/tmp/configured-agy",
           args: ["models"],
         });
-        expect(seenCommand.options).toMatchObject({ forceKillAfter: expect.anything() });
+        expect(seenCommand.options).toMatchObject({
+          stdin: "ignore",
+          forceKillAfter: expect.anything(),
+        });
         expect(discovery.installed).toBe(true);
         expect(discovery.models[0]?.slug).toBe("gemini-3.7-flash-high");
       }),
